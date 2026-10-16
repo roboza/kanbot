@@ -1,5 +1,5 @@
 // Pure logic: no `$`, so every rule here is tested directly.
-import type { Card, Column, Project, ProjectDraft } from '../types'
+import type { Card, Column, Project, ProjectDraft, WorkspaceRepo } from '../types'
 
 export const COLUMNS: readonly Column[] = ['backlog', 'queued', 'running', 'review', 'done']
 
@@ -155,6 +155,32 @@ export function branchFor(card: Card): string {
   return `kanbot/${card.id}`
 }
 
+/** A path in one spelling: forward slashes, no trailing slash, a lower-case drive letter. */
+export function normPath(path: string): string {
+  const p = path.replace(/\\/g, '/').replace(/\/+$/, '')
+  return /^[A-Za-z]:/.test(p) ? p[0]!.toLowerCase() + p.slice(1) : p
+}
+
+/** Whether `inner` is `outer` or inside it; a path with no drive matches any drive. */
+export function isWithin(inner: string, outer: string): boolean {
+  const strip = (p: string) => normPath(p).replace(/^[a-z]:/, '').toLowerCase()
+  const i = strip(inner)
+  const o = strip(outer)
+  return i === o || i.startsWith(o + '/')
+}
+
+export function joinPath(dir: string, name: string): string {
+  return `${dir.replace(/[\\/]+$/, '')}/${name}`
+}
+
+/** The workspace repos a card may change: its own pick, or every repo. */
+export function reposFor(project: Project, card: Card): WorkspaceRepo[] {
+  const all = project.repos ?? []
+  if (card.repos === undefined || card.repos.length === 0) return all
+  const picked = all.filter(r => card.repos?.includes(r.name))
+  return picked.length === 0 ? all : picked
+}
+
 export function worktreeFor(project: Project, card: Card): string {
   const path = project.path.replace(/[\\/]+$/, '')
   const cut = Math.max(path.lastIndexOf('/'), path.lastIndexOf('\\'))
@@ -192,6 +218,12 @@ export function cardPrompt(project: Project, card: Card, cwd: string): string {
   if (project.type === 'repo') {
     lines.push(`- You are on branch ${branchFor(card)} in a git worktree made for this card. Commit your work to this branch with clear messages.`)
     lines.push('- Do not switch branches, merge, rebase onto other branches, or push. Kanbot merges the branch after review.')
+  } else if (project.type === 'workspace') {
+    const repos = reposFor(project, card)
+    lines.push(`- Your working directory mirrors the workspace ${project.path}: each folder in it is a git worktree of that repo, on branch ${branchFor(card)}.`)
+    lines.push(`- The repos you may change: ${repos.map(r => r.name).join(', ')}. Other repos of the workspace are not here; if the work needs one, stop and say so.`)
+    lines.push('- Commit in each repo you change, with clear messages. Leave repos you do not need untouched.')
+    lines.push('- Do not switch branches, merge, rebase onto other branches, or push. Kanbot merges each changed repo after review.')
   } else {
     lines.push('- This is a plain working folder, not a git repository. Save what you produce as files in it.')
   }
@@ -202,6 +234,7 @@ export function cardPrompt(project: Project, card: Card, cwd: string): string {
 }
 
 export function mergePrompt(project: Project, card: Card): string {
+  if (project.type === 'workspace') return workspaceMergePrompt(project, card)
   const branch = card.branch ?? branchFor(card)
   const base = project.baseBranch
   const steps = [
@@ -218,6 +251,29 @@ export function mergePrompt(project: Project, card: Card): string {
   steps.push('')
   steps.push('End with one line that starts MERGED or NOT MERGED, then a short reason.')
   return steps.join('\n')
+}
+
+function workspaceMergePrompt(project: Project, card: Card): string {
+  const branch = card.branch ?? branchFor(card)
+  const names = card.mergeRepos ?? []
+  const repos = (project.repos ?? []).filter(r => names.includes(r.name))
+  const message = `Merge Kanbot card ${card.id}: ${card.title.replace(/"/g, "'")}`
+  const test = project.testCommand.trim()
+  const lines = [
+    `Kanbot: merge card ${card.id} ("${card.title}") for the workspace "${project.name}" at ${project.path}.`,
+    `Branch ${branch} is merged into each of these repos (folder: base branch):`,
+    ...repos.map(r => `- ${r.name}: ${r.baseBranch}`),
+    '',
+    `1. Check every repo first: in ${project.path}/<repo>, run \`git status\`. If any has uncommitted changes, or its checked-out branch is not its base branch, stop and report that. Merge nothing.`,
+    `2. Then, one repo at a time, run \`git merge --no-ff ${branch} -m "${message}"\`. Resolve a conflict only when the right result is clear; otherwise run \`git merge --abort\` in that repo and stop, reporting the conflicting files. Do not merge the remaining repos.`,
+  ]
+  if (test !== '') {
+    lines.push(`3. After each merge, run \`${test}\` in that repo if it applies there. If it fails, undo that merge with \`git reset --hard ORIG_HEAD\` and stop, reporting the failure.`)
+  }
+  lines.push(`${test !== '' ? 4 : 3}. Do not push, and do not delete branches or worktrees: Kanbot cleans those up.`)
+  lines.push('')
+  lines.push('End with one line per repo that starts MERGED or NOT MERGED, then the repo and a short reason.')
+  return lines.join('\n')
 }
 
 export type Counts = { running: number; waiting: number; review: number; queued: number }

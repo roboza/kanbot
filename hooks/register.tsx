@@ -11,6 +11,7 @@ import {
   applyUserMove,
   checkProject,
   deleteCard,
+  discoverRepos,
   loadBoard,
   nextColour,
   patchCard,
@@ -39,6 +40,7 @@ import {
   cardMeta,
   counts,
   inColumn,
+  isWithin,
   newId,
   parseAdd,
   rankAt,
@@ -82,7 +84,7 @@ async function openPane($: E, tab?: Tab): Promise<void> {
 
 function projectForCwd(projects: readonly Project[], cwd: string): Project | undefined {
   const sorted = [...projects].sort((a, b) => b.path.length - a.path.length)
-  return sorted.find(p => cwd === p.path || cwd.startsWith(p.path.replace(/\/+$/, '') + '/'))
+  return sorted.find(p => isWithin(cwd, p.path))
 }
 
 async function defaultProject($: E, board: Board): Promise<Project | undefined> {
@@ -431,6 +433,39 @@ export const register: Register = on => {
               }}
             />
           )}
+          {project?.type === 'workspace' && (
+            <Box flexDirection="column">
+              <Text> </Text>
+              <Text bold>{`Repos${card.repos === undefined || card.repos.length === 0 ? ' (all)' : ''}`}</Text>
+              <Box flexDirection="row" columnGap={2} flexWrap="wrap">
+                {(project.repos ?? []).map(r => {
+                  const picked = card.repos === undefined || card.repos.length === 0 || card.repos.includes(r.name)
+                  const canPick = card.column === 'backlog' || card.column === 'queued'
+                  return canPick ? (
+                    <Button
+                      key={`repo-${card.id}-${r.name}`}
+                      plain
+                      onPress={() =>
+                        void patchCard($, card.id, c => {
+                          const all = (project.repos ?? []).map(x => x.name)
+                          const now = c.repos === undefined || c.repos.length === 0 ? all : c.repos
+                          const next = now.includes(r.name) ? now.filter(n => n !== r.name) : [...now, r.name]
+                          return { ...c, repos: next.length === 0 || next.length === all.length ? undefined : next }
+                        })
+                      }
+                    >
+                      <Text bold={picked} dimColor={!picked}>{`${picked ? '[x]' : '[ ]'} ${r.name}`}</Text>
+                    </Button>
+                  ) : (
+                    <Text key={`repo-${card.id}-${r.name}`} dimColor={!picked}>{`${picked ? '[x]' : '[ ]'} ${r.name}`}</Text>
+                  )
+                })}
+              </Box>
+              {card.mergeRepos !== undefined && card.mergeRepos.length > 0 && (
+                <Text color="yellow" wrap="wrap">{`Still to merge: ${card.mergeRepos.join(', ')}`}</Text>
+              )}
+            </Box>
+          )}
           <Text> </Text>
           <Text bold>Brief</Text>
           {editable ? (
@@ -552,13 +587,22 @@ export const register: Register = on => {
           colour: old?.colour ?? nextColour(fresh.projects),
           createdAt: old?.createdAt ?? Date.now(),
         }
+        if (project.type === 'workspace') {
+          // Saving scans the folder again, so new repos are picked up.
+          project.repos = await discoverRepos($, project.path)
+          project.baseBranch = ''
+        }
         const problem = await checkProject($, project)
         if (problem !== undefined) {
           $.ui.toast(problem)
           return
         }
         await saveProject($, project)
-        $.ui.toast(`Saved ${project.name}`)
+        $.ui.toast(
+          project.type === 'workspace'
+            ? `Saved ${project.name}: found ${(project.repos ?? []).map(r => r.name).join(', ')}`
+            : `Saved ${project.name}`,
+        )
         await clear()
       }
       const cap = board.settings.globalCap
@@ -576,7 +620,13 @@ export const register: Register = on => {
                   </Text>
                 </Button>
                 <Text dimColor wrap="truncate-middle">
-                  {`${p.type} · ${p.path}${p.type === 'repo' ? ` · ${p.baseBranch} · max ${p.maxParallel}` : ''} · ${open} open`}
+                  {`${p.type} · ${p.path}${
+                    p.type === 'repo'
+                      ? ` · ${p.baseBranch} · max ${p.maxParallel}`
+                      : p.type === 'workspace'
+                        ? ` · ${(p.repos ?? []).length} repos: ${(p.repos ?? []).map(r => `${r.name} (${r.baseBranch})`).join(', ')} · max ${p.maxParallel}`
+                        : ''
+                  } · ${open} open`}
                 </Text>
               </Box>
             )
@@ -589,18 +639,35 @@ export const register: Register = on => {
             label="Type"
             options={[
               { value: 'repo', label: 'Repo: a git repository; cards get branches and are merged on Done' },
+              { value: 'workspace', label: 'Workspace: a parent folder of several repos; cards can change any of them' },
               { value: 'chat', label: 'Chat: a plain folder; cards run one at a time, no git' },
             ]}
             value={draft.type}
-            onSelect={v => void update($, DRAFT, (d): ProjectDraft => ({ ...d, type: v === 'chat' ? 'chat' : 'repo' }))}
+            onSelect={v =>
+              void update($, DRAFT, (d): ProjectDraft => ({ ...d, type: v === 'chat' ? 'chat' : v === 'workspace' ? 'workspace' : 'repo' }))
+            }
           />
           <Input key="pf-path" label="Folder" placeholder="/Users/you/work/project (absolute)" value={draft.path} onInput={set('path')} onSubmit={save} />
           {draft.type === 'repo' && (
+            <Input key="pf-base" label="Base branch" placeholder="main" value={draft.baseBranch} onInput={set('baseBranch')} onSubmit={save} />
+          )}
+          {draft.type !== 'chat' && (
             <Box flexDirection="column">
-              <Input key="pf-base" label="Base branch" placeholder="main" value={draft.baseBranch} onInput={set('baseBranch')} onSubmit={save} />
               <Input key="pf-max" label="Max parallel" placeholder="2" value={draft.maxParallel} onInput={set('maxParallel')} onSubmit={save} />
-              <Input key="pf-test" label="Test command" placeholder="npm test (optional, run after merging)" value={draft.testCommand} onInput={set('testCommand')} onSubmit={save} />
+              <Input
+                key="pf-test"
+                label="Test command"
+                placeholder={draft.type === 'workspace' ? 'optional; run in each merged repo where it applies' : 'npm test (optional, run after merging)'}
+                value={draft.testCommand}
+                onInput={set('testCommand')}
+                onSubmit={save}
+              />
             </Box>
+          )}
+          {draft.type === 'workspace' && (
+            <Text dimColor wrap="wrap">
+              Kanbot finds the git repos directly inside the folder, and each repo's base branch, when you save. Save again later to pick up new repos.
+            </Text>
           )}
           <Box flexDirection="row" columnGap={2}>
             <Button key="pf-save" label="Save" variant="primary" onPress={save} />

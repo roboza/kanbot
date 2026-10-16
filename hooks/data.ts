@@ -3,8 +3,20 @@
 import { atom, update } from 'claude-code'
 import type { EngineInterface } from 'claude-code'
 
-import type { ActivityEntry, Card, Column, Dispatcher, Project, Settings } from '../types'
-import { DEFAULT_CAP, PROJECT_COLOURS, bottomRank, branchFor, newId, topRank, userMove, worktreeFor } from './model'
+import type { ActivityEntry, Card, Column, Dispatcher, Project, Settings, WorkspaceRepo } from '../types'
+import {
+  DEFAULT_CAP,
+  PROJECT_COLOURS,
+  bottomRank,
+  branchFor,
+  isWithin,
+  joinPath,
+  newId,
+  reposFor,
+  topRank,
+  userMove,
+  worktreeFor,
+} from './model'
 
 type E = EngineInterface
 
@@ -142,6 +154,10 @@ export async function checkProject($: E, p: Project): Promise<string | undefined
   } catch {
     return `${p.path} does not exist.`
   }
+  if (p.type === 'workspace') {
+    if ((p.repos ?? []).length === 0) return `No git repos found inside ${p.path}. Each repo must be a folder directly inside it.`
+    return undefined
+  }
   if (p.type === 'repo') {
     const inside = await git($, p.path, ['rev-parse', '--is-inside-work-tree'])
     if (inside.exitCode !== 0) return `${p.path} is not a git repository. Use a chat project for plain folders.`
@@ -159,6 +175,88 @@ export async function git($: E, cwd: string, args: string[], timeoutMs = 60_000)
   }
 }
 
+/** A repo's base branch: what origin's HEAD points at, else the checked-out branch, else main. */
+async function baseOf($: E, repo: string): Promise<string> {
+  const head = await git($, repo, ['symbolic-ref', '--quiet', '--short', 'refs/remotes/origin/HEAD'])
+  if (head.exitCode === 0 && head.stdout.trim() !== '') return head.stdout.trim().replace(/^origin\//, '')
+  const current = await git($, repo, ['branch', '--show-current'])
+  return current.exitCode === 0 && current.stdout.trim() !== '' ? current.stdout.trim() : 'main'
+}
+
+/** The git repos directly inside a workspace folder, each with its base branch. */
+export async function discoverRepos($: E, path: string): Promise<WorkspaceRepo[]> {
+  let entries: { name: string; kind: string }[]
+  try {
+    entries = (await $.fs.list(path)) as { name: string; kind: string }[]
+  } catch {
+    return []
+  }
+  const repos: WorkspaceRepo[] = []
+  for (const entry of entries) {
+    if (entry.kind !== 'dir' || entry.name.startsWith('.') || entry.name === 'node_modules') continue
+    const dir = joinPath(path, entry.name)
+    // Only a repo's own top folder counts, not a folder inside the parent's repo.
+    const top = await git($, dir, ['rev-parse', '--show-toplevel'])
+    const root = top.stdout.trim()
+    if (top.exitCode !== 0 || !isWithin(root, dir) || !isWithin(dir, root)) continue
+    repos.push({ name: entry.name, baseBranch: await baseOf($, dir) })
+  }
+  return repos.sort((a, b) => a.name.localeCompare(b.name))
+}
+
+/**
+ * A workspace card's folder: one worktree per repo it may change, each on the
+ * card's branch, laid out as in the workspace.
+ */
+export async function ensureWorkspace(
+  $: E,
+  project: Project,
+  card: Card,
+): Promise<{ path: string; branch: string; touched: string[] } | { problem: string }> {
+  const branch = card.branch ?? branchFor(card)
+  const folder = card.worktree ?? worktreeFor(project, card)
+  const repos = reposFor(project, card)
+  if (repos.length === 0) return { problem: `${project.name} has no repos. Open the project and save it again to find them.` }
+  const touched = new Set(card.touched ?? [])
+  for (const repo of repos) {
+    const source = joinPath(project.path, repo.name)
+    const target = joinPath(folder, repo.name)
+    if (await $.fs.exists(target)) {
+      touched.add(repo.name)
+      continue
+    }
+    const has = await git($, source, ['rev-parse', '--verify', '--quiet', `refs/heads/${branch}`])
+    const made =
+      has.exitCode === 0
+        ? await git($, source, ['worktree', 'add', target, branch])
+        : await git($, source, ['worktree', 'add', '-b', branch, target, repo.baseBranch])
+    if (made.exitCode !== 0) return { problem: `Could not make the ${repo.name} worktree: ${made.stderr.trim().slice(0, 300)}` }
+    touched.add(repo.name)
+  }
+  return { path: folder, branch, touched: [...touched] }
+}
+
+/** The repos of a workspace card whose branch has commits its base does not. */
+export async function reposWithWork($: E, project: Project, card: Card): Promise<string[]> {
+  const branch = card.branch ?? branchFor(card)
+  const out: string[] = []
+  for (const name of card.touched ?? []) {
+    const repo = (project.repos ?? []).find(r => r.name === name)
+    if (repo === undefined) continue
+    const r = await git($, joinPath(project.path, name), ['rev-list', '--count', `${repo.baseBranch}..${branch}`])
+    if (r.exitCode === 0 && Number.parseInt(r.stdout.trim(), 10) > 0) out.push(name)
+  }
+  return out
+}
+
+/** Removes one workspace repo's worktree and the card's branch there. */
+export async function removeRepoWorktree($: E, project: Project, card: Card, name: string, deleteBranch: 'merged' | 'force'): Promise<void> {
+  const source = joinPath(project.path, name)
+  if (card.worktree !== undefined) await git($, source, ['worktree', 'remove', '--force', joinPath(card.worktree, name)])
+  await git($, source, ['worktree', 'prune'])
+  await git($, source, ['branch', deleteBranch === 'force' ? '-D' : '-d', card.branch ?? branchFor(card)])
+}
+
 /** Makes (or finds) the card's worktree on its branch; answers its path, or a problem. */
 export async function ensureWorktree($: E, project: Project, card: Card): Promise<{ path: string; branch: string } | { problem: string }> {
   const branch = card.branch ?? branchFor(card)
@@ -174,9 +272,21 @@ export async function ensureWorktree($: E, project: Project, card: Card): Promis
 }
 
 export async function removeWorktree($: E, project: Project, card: Card, deleteBranch: 'merged' | 'force'): Promise<void> {
+  if (project.type === 'workspace') {
+    for (const name of card.touched ?? []) await removeRepoWorktree($, project, card, name, deleteBranch)
+    return
+  }
   if (card.worktree !== undefined) await git($, project.path, ['worktree', 'remove', '--force', card.worktree])
   await git($, project.path, ['worktree', 'prune'])
   if (card.branch !== undefined) await git($, project.path, ['branch', deleteBranch === 'force' ? '-D' : '-d', card.branch])
+}
+
+/** Whether a workspace repo's base branch already holds the card's branch. */
+export async function isRepoMerged($: E, project: Project, card: Card, name: string): Promise<boolean> {
+  const repo = (project.repos ?? []).find(r => r.name === name)
+  if (repo === undefined) return false
+  const r = await git($, joinPath(project.path, name), ['merge-base', '--is-ancestor', card.branch ?? branchFor(card), repo.baseBranch])
+  return r.exitCode === 0
 }
 
 export async function isMerged($: E, project: Project, card: Card): Promise<boolean> {
@@ -224,6 +334,7 @@ export async function applyUserMove(
             rank: at,
             notes: text === '' ? c.notes : [...c.notes, text],
             run: undefined,
+            mergeRepos: undefined,
             waiting: undefined,
             problem: undefined,
           },
@@ -233,7 +344,7 @@ export async function applyUserMove(
       return undefined
     }
     case 'discard': {
-      if (project !== undefined && project.type === 'repo') await removeWorktree($, project, card, 'force')
+      if (project !== undefined && project.type !== 'chat') await removeWorktree($, project, card, 'force')
       await patchCard($, card.id, c =>
         withHistory(
           {
@@ -242,6 +353,8 @@ export async function applyUserMove(
             rank: at,
             branch: undefined,
             worktree: undefined,
+            touched: undefined,
+            mergeRepos: undefined,
             run: undefined,
             summary: undefined,
             progress: undefined,

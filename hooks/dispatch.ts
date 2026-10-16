@@ -5,9 +5,13 @@ import type { EngineInterface } from 'claude-code'
 import type { ActivityEntry, Card, Project } from '../types'
 import type { Board } from './data'
 import {
+  ensureWorkspace,
   ensureWorktree,
   getCard,
   isMerged,
+  isRepoMerged,
+  removeRepoWorktree,
+  reposWithWork,
   loadBoard,
   logActivity,
   patchCard,
@@ -182,6 +186,18 @@ async function startCard($: E, board: Board, project: Project, card: Card): Prom
     cwd = wt.path
     extra = { branch: wt.branch, worktree: wt.path }
   }
+  if (project.type === 'workspace') {
+    const ws = await ensureWorkspace($, project, claimed)
+    if ('problem' in ws) {
+      await patchCard($, card.id, c =>
+        withHistory({ ...c, column: 'backlog', run: undefined, problem: ws.problem }, 'Could not start'),
+      )
+      note(card, `could not start: ${ws.problem}`)
+      return
+    }
+    cwd = ws.path
+    extra = { branch: ws.branch, worktree: ws.path, touched: ws.touched }
+  }
   const spawned = await spawnAgent($, {
     prompt: cardPrompt(project, { ...claimed, ...extra }, cwd),
     description: `Kanbot ${card.id}: ${card.title}`.slice(0, 60),
@@ -211,8 +227,26 @@ async function startMerge($: E, project: Project, card: Card): Promise<void> {
       : undefined,
   )
   if (claimed === undefined) return
+  let toMerge = claimed
+  if (project.type === 'workspace') {
+    const names = claimed.mergeRepos !== undefined && claimed.mergeRepos.length > 0 ? claimed.mergeRepos : await reposWithWork($, project, claimed)
+    if (names.length === 0) {
+      // Nothing was committed anywhere: nothing to merge, only worktrees to remove.
+      for (const name of claimed.touched ?? []) await removeRepoWorktree($, project, claimed, name, 'force')
+      await patchCard($, card.id, c =>
+        withHistory(
+          { ...c, column: 'done', run: undefined, branch: undefined, worktree: undefined, touched: undefined, mergeRepos: undefined },
+          'Done: no repo had commits to merge',
+        ),
+      )
+      note(card, 'done; nothing to merge')
+      return
+    }
+    const saved = await patchCard($, card.id, c => ({ ...c, mergeRepos: names }))
+    toMerge = saved ?? { ...claimed, mergeRepos: names }
+  }
   const spawned = await spawnAgent($, {
-    prompt: mergePrompt(project, claimed),
+    prompt: mergePrompt(project, toMerge),
     description: `Kanbot merge ${card.id}`.slice(0, 60),
     cwd: project.path,
   })
@@ -315,6 +349,12 @@ export async function finished(
   p.dirty = true
   await flush($, board)
 
+  if (card.run.phase === 'merge' && project !== undefined && project.type === 'workspace') {
+    await finishWorkspaceMerge($, board, project, card, end.answer)
+    pending.delete(cardId)
+    return
+  }
+
   if (card.run.phase === 'merge') {
     if (project !== undefined && (await isMerged($, project, card))) {
       await removeWorktree($, project, card, 'merged')
@@ -357,6 +397,57 @@ export async function finished(
   note(card, 'ready for review')
   $.ui.toast(`Kanbot ${card.id} is ready for review: ${card.title}`)
   pending.delete(cardId)
+}
+
+/** Checks each repo the merge was to land in, cleans up what landed, keeps the rest in Review. */
+async function finishWorkspaceMerge($: E, board: Board, project: Project, card: Card, answer: string): Promise<void> {
+  const wanted = card.mergeRepos ?? []
+  const merged: string[] = []
+  for (const name of wanted) {
+    if (await isRepoMerged($, project, card, name)) {
+      await removeRepoWorktree($, project, card, name, 'merged')
+      merged.push(name)
+    }
+  }
+  const left = wanted.filter(n => !merged.includes(n))
+  if (left.length === 0) {
+    // Repos the card never changed still hold a worktree: remove those too.
+    for (const name of (card.touched ?? []).filter(n => !merged.includes(n))) await removeRepoWorktree($, project, card, name, 'force')
+    await patchCard($, card.id, c =>
+      withHistory(
+        {
+          ...c,
+          column: 'done',
+          rank: topRank(board.cards, 'done'),
+          run: undefined,
+          branch: undefined,
+          worktree: undefined,
+          touched: undefined,
+          mergeRepos: undefined,
+          waiting: undefined,
+          problem: undefined,
+        },
+        `Merged ${merged.join(', ')}; Done`,
+      ),
+    )
+    note(card, `merged ${merged.join(', ')}`)
+    $.ui.toast(`Kanbot ${card.id} merged: ${card.title}`)
+    return
+  }
+  await patchCard($, card.id, c =>
+    withHistory(
+      {
+        ...c,
+        run: undefined,
+        mergeRepos: left,
+        touched: (c.touched ?? []).filter(n => !merged.includes(n)),
+        problem: `Not merged: ${left.join(', ')}.${merged.length > 0 ? ` Merged: ${merged.join(', ')}.` : ''} Mark it Done again to retry. ${answer.trim().slice(-500)}`,
+      },
+      merged.length > 0 ? `Merged ${merged.join(', ')}; ${left.join(', ')} left` : 'Merge did not complete',
+    ),
+  )
+  note(card, `merge incomplete: ${left.join(', ')} left`)
+  $.ui.toast(`Kanbot ${card.id}: ${left.join(', ')} not merged`)
 }
 
 export function dispatcherState(board: Board, now: number): 'mine' | 'other' | 'stale' | 'none' {

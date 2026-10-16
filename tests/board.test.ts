@@ -136,4 +136,48 @@ describe('board pane', () => {
     expect(await ui.find({ type: 'Text', text: 'None yet.' })).toBeDefined()
     await ui.unmount()
   })
+
+  test('saving a workspace finds the repos inside it, Windows paths included', async ($, on) => {
+    mock.store(on, {})
+    const toasts: string[] = []
+    on('ui.toast', async (_$, e) => {
+      toasts.push(JSON.stringify(e))
+      return { value: null } as never
+    })
+    on('fs.stat', async () => ({ value: { kind: 'dir', size: 0, mtimeMs: 0, isLink: false } }) as never)
+    on('fs.list', async () =>
+      ({
+        value: [
+          { name: 'ideajudge-ui', kind: 'dir', size: 0, mtimeMs: 0, isLink: false },
+          { name: 'ideajudge-services', kind: 'dir', size: 0, mtimeMs: 0, isLink: false },
+          { name: 'docs', kind: 'dir', size: 0, mtimeMs: 0, isLink: false },
+          { name: '.vscode', kind: 'dir', size: 0, mtimeMs: 0, isLink: false },
+          { name: 'notes.md', kind: 'file', size: 0, mtimeMs: 0, isLink: false },
+        ],
+      }) as never,
+    )
+    on('process.run', async (_$, e) => {
+      const argv = (e as unknown as { argv: string[] }).argv
+      const dir = argv[2] ?? ''
+      const name = dir.split('/').pop() ?? ''
+      const ok = (stdout: string) => ({ value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never
+      const fail = () => ({ value: { exitCode: 1, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }) as never
+      if (argv[3] === 'rev-parse') {
+        // git on Windows answers with the drive letter; docs/ is not a repo.
+        return name === 'docs' ? fail() : ok(`C:/development/ideajudge-2026/${name}\n`)
+      }
+      if (argv[3] === 'symbolic-ref') return name === 'ideajudge-ui' ? ok('origin/develop\n') : fail()
+      if (argv[3] === 'branch') return ok('main\n')
+      return fail()
+    })
+    const ui = await $.ui.mount({ plugin: 'kanbot', surface: 'desktop', ...PANE })
+    await ui.press({ key: 'go-projects' })
+    await ui.input({ key: 'pf-name', text: 'IdeaJudge 2026', kind: 'change' })
+    await ui.select({ key: 'pf-type', value: 'workspace' })
+    await ui.input({ key: 'pf-path', text: '/development/ideajudge-2026', kind: 'change' })
+    await ui.press({ key: 'pf-save' })
+    expect(toasts.join(' ')).toContain('found ideajudge-services, ideajudge-ui')
+    expect(await ui.find({ type: 'Text', text: /2 repos: ideajudge-services \(main\), ideajudge-ui \(develop\)/ })).toBeDefined()
+    await ui.unmount()
+  })
 })

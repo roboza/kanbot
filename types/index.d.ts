@@ -1,15 +1,23 @@
 // Kanbot's data model and its $.state contract.
 
-export type ProjectType = 'repo' | 'chat'
+export type ProjectType = 'repo' | 'chat' | 'workspace'
+
+/** One git repo inside a workspace project: its folder name and base branch. */
+export type WorkspaceRepo = { name: string; baseBranch: string }
 
 export type Project = {
   id: string
   name: string
   type: ProjectType
-  /** Absolute folder: a git repo for `repo`, a plain folder for `chat`. */
+  /**
+   * Absolute folder: a git repo for `repo`, a plain folder for `chat`, a
+   * parent folder holding several repos for `workspace`.
+   */
   path: string
   /** Repo projects: the branch cards branch from and merge into. */
   baseBranch: string
+  /** Workspace projects: the repos found inside `path`, each with its own base. */
+  repos?: WorkspaceRepo[]
   /** Most cards of this project running at once (chat projects: always 1). */
   maxParallel: number
   /** Optional command the merge agent runs after merging (e.g. `npm test`). */
@@ -44,9 +52,18 @@ export type Card = {
   column: Column
   /** Order within its column: lower is higher on the board. */
   rank: number
-  /** Repo cards: the card's branch and worktree, kept across runs. */
+  /**
+   * Repo and workspace cards: the card's branch and its worktree (for a
+   * workspace, the card folder holding one worktree per repo), kept across runs.
+   */
   branch?: string
   worktree?: string
+  /** Workspace cards: the repos the card may change; absent means all of them. */
+  repos?: string[]
+  /** Workspace cards: the repos that have a worktree for this card. */
+  touched?: string[]
+  /** Workspace cards: the repos a merge in progress, or a retry, still has to merge. */
+  mergeRepos?: string[]
   run?: CardRun
   /** Set when Robert marks a repo card Done; the dispatcher then merges it. */
   mergeRequested?: boolean
