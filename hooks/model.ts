@@ -340,3 +340,78 @@ export function parseAdd(args: string, projects: readonly Project[]): { projectI
   const brief = bar < 0 ? '' : rest.slice(bar + 1).trim()
   return projectId === undefined ? { title, brief } : { projectId, title, brief }
 }
+
+/** A card the model proposes from a plan, checked and ready to add to Backlog. */
+export type PlannedCard = { title: string; brief: string; acceptance: string[]; mode: Card['mode']; repos?: string[] }
+
+export const MAX_PLANNED = 20
+
+/** Reads a project named at the start of `text` (by name or id); the rest is left over. */
+export function leadingProject(text: string, projects: readonly Project[]): { project?: Project; rest: string } {
+  const t = text.trim()
+  const lower = t.toLowerCase()
+  const byLength = [...projects].sort((a, b) => b.name.length - a.name.length)
+  for (const p of byLength) {
+    for (const name of [p.name.toLowerCase(), p.id.toLowerCase()]) {
+      if (name === '' || !lower.startsWith(name)) continue
+      const after = t.slice(name.length)
+      if (after === '' || /^[\s:]/.test(after)) return { project: p, rest: after.replace(/^[\s:]+/, '').trim() }
+    }
+  }
+  return { rest: t }
+}
+
+/** Finds a project by name or id, ignoring case. */
+export function findProject(name: string, projects: readonly Project[]): Project | undefined {
+  const n = name.trim().toLowerCase()
+  return projects.find(p => p.name.toLowerCase() === n || p.id.toLowerCase() === n)
+}
+
+/** Checks the queue_cards tool's `cards` against the project; answers the cards, or what is wrong. */
+export function checkPlanned(raw: unknown, project: Project): { cards: PlannedCard[] } | { error: string } {
+  if (!Array.isArray(raw) || raw.length === 0) return { error: '`cards` must be a non-empty list.' }
+  if (raw.length > MAX_PLANNED) return { error: `At most ${MAX_PLANNED} cards at once; merge some steps into one card.` }
+  const known = (project.repos ?? []).map(r => r.name)
+  const cards: PlannedCard[] = []
+  for (const [i, item] of raw.entries()) {
+    const at = `Card ${i + 1}`
+    if (typeof item !== 'object' || item === null) return { error: `${at} is not an object.` }
+    const c = item as Record<string, unknown>
+    const title = typeof c.title === 'string' ? c.title.trim() : ''
+    if (title === '') return { error: `${at} has no title.` }
+    if (title.length > 120) return { error: `${at}'s title is over 120 characters; put the detail in the brief.` }
+    const brief = typeof c.brief === 'string' ? c.brief.trim() : ''
+    if (brief === '') return { error: `${at} (${title}) has no brief. The agent that runs it cannot see this conversation.` }
+    const acceptance = Array.isArray(c.acceptance) ? c.acceptance.filter((a): a is string => typeof a === 'string' && a.trim() !== '').map(a => a.trim()) : []
+    const mode = c.mode === 'parallel' ? 'parallel' : 'sequential'
+    const card: PlannedCard = { title, brief, acceptance, mode }
+    if (project.type === 'workspace' && Array.isArray(c.repos) && c.repos.length > 0) {
+      const repos = c.repos.filter((r): r is string => typeof r === 'string')
+      const unknown = repos.filter(r => !known.includes(r))
+      if (unknown.length > 0) return { error: `${at} (${title}) names repos ${unknown.join(', ')} that ${project.name} does not have. It has: ${known.join(', ')}.` }
+      // Every repo is the same as none: the card may change them all.
+      if (repos.length < known.length) card.repos = [...new Set(repos)]
+    }
+    cards.push(card)
+  }
+  return { cards }
+}
+
+/** What the model is asked to do when the person runs `/kanbot queue`. */
+export function queuePrompt(project: Project, guidance: string): string {
+  const repos = project.type === 'workspace' ? (project.repos ?? []).map(r => r.name) : []
+  return [
+    `Turn the plan we agreed in this conversation into Kanbot cards for the project "${project.name}" (${project.type}, ${project.path}), and add them with the mcp__kanbot__queue_cards tool.`,
+    '',
+    'How to split and write them:',
+    '- One card per piece of work that can be reviewed and merged on its own, in the order they should run. Prefer a few substantial cards over many tiny ones.',
+    '- Each card is run later by a fresh background Claude agent in its own worktree. It cannot see this conversation, so the brief must stand alone: the goal, the files or areas involved, the decisions we made here, constraints, and what done looks like.',
+    '- acceptance: one to five checks a reviewer can verify.',
+    "- mode: sequential when a card builds on an earlier card (it waits for the cards above it, and only sees their changes once they are merged); parallel when it can run alongside the others.",
+    ...(repos.length > 0 ? [`- repos: the repos the card changes, from: ${repos.join(', ')}. Leave it out when a card may change any of them.`] : []),
+    '- If this conversation has no clear plan to turn into cards, say so and do not call the tool.',
+    '',
+    'The cards land in Backlog for review; nothing runs until they are moved to Queued. Afterwards, list the cards you added in one short line each.',
+    ...(guidance !== '' ? ['', `Extra guidance: ${guidance}`] : []),
+  ].join('\n')
+}

@@ -43,6 +43,15 @@ To try it without installing, start the terminal with `claude --plugin-dir ~/cla
 5. **Queue work.** Drag cards from Backlog to Queued, ordered top to bottom. Kanbot starts them as room allows.
 6. **Review.** When a card reaches Review, open it to read Claude's summary. Then drag it to Done (or press Done) to merge it, send it back with a note, or discard the work.
 
+## From a plan to cards
+
+Plan the work in any Code-tab or terminal session. When you have agreed a plan, run `/kanbot queue`. Claude splits the plan into cards and adds them to Backlog through Kanbot's `queue_cards` tool. Each card gets a self-contained brief (the agent that runs it can't see the conversation), acceptance checks, sequential or parallel, and, for a workspace, the repos it changes.
+
+- The project is the one whose folder holds the session's folder. Name another one first: `/kanbot queue IdeaJudge`.
+- Anything after the project is passed on as guidance: `/kanbot queue IdeaJudge keep it to three cards`.
+- Cards wait in Backlog. Review and edit them on the board, then move them to Queued to run them.
+- You can also just ask Claude to "put this plan on Kanbot", which uses the same tool.
+
 ## How cards run
 
 - Each project's queue drains top to bottom. A **sequential** card waits until nothing else of its project runs and holds the cards under it. A **parallel** card starts while the project's limit allows. Chat projects always run one card at a time.
@@ -59,6 +68,7 @@ To try it without installing, start the terminal with `claude --plugin-dir ~/cla
 | --- | --- |
 | `/kanbot` | Open the board |
 | `/kanbot add <title>` | Add a card; also `<project>: <title> \| <brief>` |
+| `/kanbot queue [project] [notes]` | Have Claude turn the plan agreed in this conversation into cards in Backlog |
 | `/kanbot work` | Make this session the dispatcher (`work force` takes over from another) |
 | `/kanbot pause` / `resume` | Stop or restart starting new cards |
 | `/kanbot stop` | Stop dispatching from this session |

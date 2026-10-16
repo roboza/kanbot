@@ -1,6 +1,6 @@
 {
   "name": "kanbot",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "license": "MIT",
   "description": "A global kanban board in Claude Code that hands queued cards to background Claude agents across your projects",
   "author": { "name": "Robert Oswald" },

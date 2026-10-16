@@ -8,6 +8,7 @@ import type { BoardProps } from './board-client'
 import type { Board } from './data'
 import {
   addCard,
+  addCards,
   applyUserMove,
   checkProject,
   deleteCard,
@@ -38,11 +39,15 @@ import {
   ago,
   cardFlag,
   cardMeta,
+  checkPlanned,
   counts,
+  findProject,
   inColumn,
   isWithin,
+  leadingProject,
   newId,
   parseAdd,
+  queuePrompt,
   rankAt,
   statusLine,
 } from './model'
@@ -58,11 +63,46 @@ const EDITING = atom({ plugin: 'kanbot', key: 'editing' } as const, '')
 type E = EngineInterface
 
 const PANE = 'kanbot'
+const QUEUE_TOOL = 'mcp__kanbot__queue_cards'
+const QUEUE_SPEC = {
+  name: 'queue_cards',
+  description: [
+    "Adds cards to the Kanbot board's Backlog, in order, for the person to review and then queue.",
+    'Each card is later run by a background Claude agent that cannot see this conversation, so each brief must stand alone.',
+    'Use it when the person asks to put a plan or tasks on Kanbot (for example after /kanbot queue).',
+  ].join(' '),
+  inputSchema: {
+    type: 'object',
+    properties: {
+      project: { type: 'string', description: "The Kanbot project's name. Leave it out to use the project this session's folder belongs to." },
+      cards: {
+        type: 'array',
+        minItems: 1,
+        maxItems: 20,
+        description: 'The cards in the order they should run.',
+        items: {
+          type: 'object',
+          properties: {
+            title: { type: 'string', description: 'Short imperative title, under 120 characters.' },
+            brief: { type: 'string', description: 'Self-contained instructions: goal, files or areas, decisions, constraints, what done looks like.' },
+            acceptance: { type: 'array', items: { type: 'string' }, description: 'One to five checks a reviewer can verify.' },
+            mode: { type: 'string', enum: ['sequential', 'parallel'], description: 'sequential waits for the cards above it; parallel can run alongside them. Default sequential.' },
+            repos: { type: 'array', items: { type: 'string' }, description: 'Workspace projects only: the repos this card changes. Leave out for all.' },
+          },
+          required: ['title', 'brief'],
+        },
+      },
+    },
+    required: ['cards'],
+  },
+  isDeferred: false,
+} as const
 const TICK_MS = 3000
 const HELP = [
   'Kanbot commands:',
   '  /kanbot                      open the board',
   '  /kanbot add <title>          add a card (also "<project>: <title> | <brief>")',
+  '  /kanbot queue [project] [notes]  have Claude turn this conversation\'s plan into Backlog cards',
   '  /kanbot work                 make this session the dispatcher that runs cards',
   '  /kanbot pause | resume       stop or restart starting new cards',
   '  /kanbot stop                 stop dispatching from this session',
@@ -144,11 +184,16 @@ export const register: Register = on => {
       await $.command.register({
         name: 'kanbot',
         description: 'Kanbot board: add, work, pause, resume, stop, projects, help',
-        argumentHint: '[add <title> | work | pause | resume | stop | projects | help]',
+        argumentHint: '[add <title> | queue [project] | work | pause | resume | stop | projects | help]',
         immediate: true,
       })
     } catch (err) {
       $.ui.log(`kanbot: could not register /kanbot: ${String(err)}`)
+    }
+    try {
+      await $.tool.register({ ...QUEUE_SPEC })
+    } catch (err) {
+      $.ui.log(`kanbot: could not register the queue_cards tool: ${String(err)}`)
     }
     return next(e)
   })
@@ -183,6 +228,22 @@ export const register: Register = on => {
         await touch($)
         return { text: 'This session no longer dispatches. Running agents keep going until they finish.' }
       }
+      case 'queue':
+      case 'plan': {
+        const board = await loadBoard($)
+        if (board.projects.length === 0) return { text: 'Add a project first: /kanbot projects' }
+        const lead = leadingProject(tail, board.projects)
+        const project = lead.project ?? (await defaultProject($, board))
+        if (project === undefined) {
+          return { text: `Which project? Use /kanbot queue <project>. Projects: ${board.projects.map(p => p.name).join(', ')}` }
+        }
+        // A command hook may not submit (it would wait on its own turn): submit once it has returned.
+        const text = queuePrompt(project, lead.rest)
+        $.clock.after(0, () => {
+          $.prompt.submit({ text }).catch(err => $.ui.log(`kanbot: could not hand the plan to Claude: ${String(err)}`))
+        })
+        return { text: `Asking Claude to turn this conversation's plan into cards for ${project.name}. They will land in Backlog for you to review.` }
+      }
       case 'add': {
         const board = await loadBoard($)
         if (board.projects.length === 0) return { text: 'Add a project first: /kanbot projects' }
@@ -197,6 +258,30 @@ export const register: Register = on => {
       }
       default:
         return { text: `Unknown: /kanbot ${verb}\n\n${HELP}` }
+    }
+  })
+
+  // The model adds a plan's cards to Backlog.
+  on('tool.call', { tool: QUEUE_TOOL }, async ($, e) => {
+    const input = e as unknown as { project?: unknown; cards?: unknown }
+    const board = await loadBoard($)
+    if (board.projects.length === 0) return { deny: 'Kanbot has no projects yet. Ask the person to add one with /kanbot projects.' }
+    const named = typeof input.project === 'string' && input.project.trim() !== '' ? input.project : undefined
+    const project = named !== undefined ? findProject(named, board.projects) : await defaultProject($, board)
+    if (project === undefined) {
+      const list = board.projects.map(p => p.name).join(', ')
+      return { deny: named !== undefined ? `No Kanbot project is called "${named}". Projects: ${list}.` : `Say which project with \`project\`. Projects: ${list}.` }
+    }
+    const checked = checkPlanned(input.cards, project)
+    if ('error' in checked) return { deny: checked.error }
+    const added = await addCards($, board, project.id, checked.cards, 'Created from a plan')
+    $.ui.toast(`Kanbot: ${added.length} card${added.length === 1 ? '' : 's'} added to ${project.name}'s Backlog`)
+    return {
+      result: [
+        `Added ${added.length} card${added.length === 1 ? '' : 's'} to ${project.name}'s Backlog:`,
+        ...added.map(c => `- ${c.id} ${c.title} (${c.mode}${c.repos !== undefined ? `; ${c.repos.join(', ')}` : ''})`),
+        'They stay in Backlog until the person reviews them and moves them to Queued on the board.',
+      ].join('\n'),
     }
   })
 

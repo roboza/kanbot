@@ -99,7 +99,7 @@ export async function readActivity($: E): Promise<ActivityEntry[]> {
 export async function addCard(
   $: E,
   board: Board,
-  input: { projectId: string; title: string; brief: string },
+  input: { projectId: string; title: string; brief: string; acceptance?: string[]; mode?: Card['mode']; repos?: string[]; origin?: string },
 ): Promise<Card> {
   const now = Date.now()
   const card: Card = {
@@ -107,18 +107,37 @@ export async function addCard(
     projectId: input.projectId,
     title: input.title,
     brief: input.brief,
-    acceptance: [],
+    acceptance: input.acceptance ?? [],
     notes: [],
-    mode: 'sequential',
+    mode: input.mode ?? 'sequential',
     column: 'backlog',
     rank: bottomRank(board.cards, 'backlog'),
-    history: [{ at: now, text: 'Created' }],
+    history: [{ at: now, text: input.origin ?? 'Created' }],
     createdAt: now,
     updatedAt: now,
   }
+  if (input.repos !== undefined) card.repos = input.repos
   await $.store.set(`card:${card.id}`, card)
   await touch($)
   return card
+}
+
+/** Adds cards to the bottom of Backlog in the order given. */
+export async function addCards(
+  $: E,
+  board: Board,
+  projectId: string,
+  cards: readonly { title: string; brief: string; acceptance: string[]; mode: Card['mode']; repos?: string[] }[],
+  origin: string,
+): Promise<Card[]> {
+  const added: Card[] = []
+  let seen = board
+  for (const c of cards) {
+    const card = await addCard($, seen, { projectId, ...c, origin })
+    added.push(card)
+    seen = { ...seen, cards: [...seen.cards, card] }
+  }
+  return added
 }
 
 export async function deleteCard($: E, card: Card): Promise<void> {
