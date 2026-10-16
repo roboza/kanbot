@@ -17,14 +17,14 @@ From GitHub:
 
 ```bash
 claude plugin marketplace add roboza/kanbot
-claude plugin install kanbot@kanbot-local
+claude plugin install kanbot@kanbot
 ```
 
 Or from a local copy: unzip or clone this folder somewhere you keep it, for example `~/claude-mods/kanbot`. Then, in a terminal:
 
 ```bash
 claude plugin marketplace add ~/claude-mods/kanbot
-claude plugin install kanbot@kanbot-local
+claude plugin install kanbot@kanbot
 ```
 
 Kanbot is then active in new sessions, including the Code tab of the desktop app. Because the marketplace is a local folder, edits to the folder take effect after `/reload-plugins`.

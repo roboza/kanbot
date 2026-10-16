@@ -1,5 +1,5 @@
 {
-  "name": "kanbot-local",
+  "name": "kanbot",
   "owner": { "name": "Robert Oswald" },
   "plugins": [{ "name": "kanbot", "source": "./" }]
 }
