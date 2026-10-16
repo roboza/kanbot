@@ -64,6 +64,23 @@ describe('board pane', () => {
       await ui.unmount()
     })
 
+    test(`a region measured too short still draws its cards, unclipped (${surface})`, async ($, on) => {
+      mock.store(on, {
+        ...seed(),
+        'card:b2': card('b2', { column: 'backlog', title: 'Second', rank: 1 }),
+        'card:b3': card('b3', { column: 'backlog', title: 'Third', rank: 2 }),
+      })
+      const ui = await $.ui.mount({ plugin: 'kanbot', surface, ...PANE })
+      // The desktop has reported a region one row tall before its layout settles.
+      await ui.resize({ columns: 100, rows: 1, in: 'board' })
+      for (const title of [/Fix login/, /Second/, /Third/, /Add export/, /Tidy README/]) {
+        expect(await ui.find({ in: 'board', text: title })).toBeDefined()
+      }
+      const column = await ui.find({ in: 'board', key: 'backlog' })
+      expect((column as { props?: Record<string, unknown> } | undefined)?.props?.height).toBeUndefined()
+      await ui.unmount()
+    })
+
     test(`dragging Backlog to Queued queues the card (${surface})`, async ($, on) => {
       mock.store(on, seed())
       const toasts: string[] = []

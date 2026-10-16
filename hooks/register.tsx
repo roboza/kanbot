@@ -484,7 +484,7 @@ export const register: Register = on => {
             />
           </Box>
           <Box marginTop={1}>
-            <Client key="board" module="./board-client.tsx" props={{ cols }} width="100%" height={rows} />
+            <Client key="board" module="./board-client.tsx" props={{ cols, rows, columns: width }} width="100%" height={rows} />
           </Box>
           <Text size="footnote" dimColor wrap="truncate-end">
             Drag cards between columns · click to open · Backlog → Queued starts a card · Review → Done merges it
