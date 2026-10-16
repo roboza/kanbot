@@ -19,7 +19,7 @@ export type BoardProps = { cols: ColView[] }
 type Drag = { id: string; fromCol: number; fromIdx: number; sx: number; sy: number; x: number; y: number }
 type S = { drag?: Drag; armed: boolean }
 
-/** Rows above the first card: the column's top border and its name. */
+/** Rows above the first card: the column's name and a rule. */
 export const HEAD = 2
 /** Rows per card: title, status line, gap. */
 export const CARD_H = 3
@@ -31,9 +31,9 @@ export function colWidth(columns: number, n: number): number {
   return Math.max(8, Math.floor(columns / Math.max(1, n)))
 }
 
-/** How many cards fit in a column of `rows` rows (the bottom border and a "+n more" row kept). */
+/** How many cards fit in a column of `rows` rows (one row kept for "+n more"). */
 export function fit(rows: number): number {
-  return Math.max(1, Math.floor((rows - HEAD - 2) / CARD_H))
+  return Math.max(1, Math.floor((rows - HEAD - 1) / CARD_H))
 }
 
 /** Which column a point is over, and the slot it would drop into. */
@@ -92,8 +92,8 @@ const Board: ClientModule<BoardProps, S> = (props, surface) => {
   const { Box, Text } = surface.elements
   const n = props.cols.length
   const w = colWidth(surface.columns, n)
-  // Inside the border.
-  const iw = Math.max(4, w - 2)
+  // One cell between columns. No Box borders here: the desktop draws them over the text.
+  const iw = Math.max(4, w - 1)
   const room = fit(surface.rows)
   const drag = surface.state?.drag
   const over = drag === undefined ? undefined : hit(props, surface.columns, surface.rows, drag.x, drag.y)
@@ -106,22 +106,16 @@ const Board: ClientModule<BoardProps, S> = (props, surface) => {
         const hidden = col.cards.length - shown.length
         const dropAt = isTarget ? over?.idx : undefined
         return (
-          <Box
-            key={col.key}
-            flexDirection="column"
-            width={w}
-            height={surface.rows}
-            overflow="hidden"
-            borderStyle="round"
-            borderColor={isTarget ? 'suggestion' : 'subtle'}
-            borderDimColor={!isTarget}
-          >
+          <Box key={col.key} flexDirection="column" width={w} height={surface.rows} overflow="hidden">
             <Box key={`${col.key}-head`} flexDirection="row" width={iw} justifyContent="space-between">
               <Text bold color={col.tone} underline={dropAt === 0 && shown.length === 0} wrap="truncate-end">
                 {`${col.name} `}
               </Text>
               <Text color="inverseText" backgroundColor={isTarget ? 'suggestion' : col.tone}>{` ${col.count} `}</Text>
             </Box>
+            <Text color={isTarget ? 'suggestion' : col.tone} dimColor={!isTarget} wrap="truncate-end">
+              {'─'.repeat(iw)}
+            </Text>
             {shown.map((card, i) => {
               const dragging = drag?.id === card.id
               const stripe = card.selected ? '█' : '▌'
