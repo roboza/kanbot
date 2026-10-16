@@ -76,6 +76,11 @@ describe('board pane', () => {
       for (const title of [/Fix login/, /Second/, /Third/, /Add export/, /Tidy README/]) {
         expect(await ui.find({ in: 'board', text: title })).toBeDefined()
       }
+      expect(await ui.find({ in: 'board', text: /more/ })).toBeUndefined()
+      // A region reported a few rows short still shows every card that fits the height asked for.
+      await ui.resize({ columns: 100, rows: 6, in: 'board' })
+      expect(await ui.find({ in: 'board', text: /Third/ })).toBeDefined()
+      expect(await ui.find({ in: 'board', text: /more/ })).toBeUndefined()
       const column = await ui.find({ in: 'board', key: 'backlog' })
       expect((column as { props?: Record<string, unknown> } | undefined)?.props?.height).toBeUndefined()
       await ui.unmount()

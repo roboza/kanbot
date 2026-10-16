@@ -31,7 +31,8 @@ let surf: ClientSurface<S> | undefined
 /** The region's size: as laid out, or what the pane asked for before the first layout. */
 export function size(props: BoardProps, s: { rows: number; columns: number }): { rows: number; columns: number } {
   return {
-    rows: s.rows >= HEAD + CARD_H ? s.rows : (props.rows ?? 12),
+    // The desktop can report fewer rows than the region was given: never show fewer cards than asked for.
+    rows: Math.max(s.rows, props.rows ?? 12),
     columns: s.columns >= 8 * Math.max(1, props.cols.length) ? s.columns : (props.columns ?? 100),
   }
 }
