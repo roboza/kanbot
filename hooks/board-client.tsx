@@ -2,14 +2,24 @@
 // columns, follows the pointer, and posts `move` and `open` to the hooks module.
 import type { ClientModule, ClientPointerEvent, ClientSurface } from 'claude-code'
 
-export type CardView = { id: string; title: string; meta: string; flag: string; colour: string; selected: boolean }
-export type ColView = { key: string; name: string; count: number; cards: CardView[] }
+export type CardView = {
+  id: string
+  title: string
+  meta: string
+  flag: string
+  /** Theme key the flag is drawn in. */
+  flagTone: string
+  colour: string
+  selected: boolean
+}
+/** `tone` is the theme key the column's name and badge are drawn in. */
+export type ColView = { key: string; name: string; tone: string; count: number; cards: CardView[] }
 export type BoardProps = { cols: ColView[] }
 
 type Drag = { id: string; fromCol: number; fromIdx: number; sx: number; sy: number; x: number; y: number }
 type S = { drag?: Drag; armed: boolean }
 
-/** Rows above the first card: the column name and a rule. */
+/** Rows above the first card: the column's top border and its name. */
 export const HEAD = 2
 /** Rows per card: title, status line, gap. */
 export const CARD_H = 3
@@ -18,12 +28,12 @@ let latest: BoardProps = { cols: [] }
 let surf: ClientSurface<S> | undefined
 
 export function colWidth(columns: number, n: number): number {
-  return Math.max(6, Math.floor(columns / Math.max(1, n)))
+  return Math.max(8, Math.floor(columns / Math.max(1, n)))
 }
 
-/** How many cards fit in a column of `rows` rows (one row kept for "+n more"). */
+/** How many cards fit in a column of `rows` rows (the bottom border and a "+n more" row kept). */
 export function fit(rows: number): number {
-  return Math.max(1, Math.floor((rows - HEAD - 1) / CARD_H))
+  return Math.max(1, Math.floor((rows - HEAD - 2) / CARD_H))
 }
 
 /** Which column a point is over, and the slot it would drop into. */
@@ -82,6 +92,8 @@ const Board: ClientModule<BoardProps, S> = (props, surface) => {
   const { Box, Text } = surface.elements
   const n = props.cols.length
   const w = colWidth(surface.columns, n)
+  // Inside the border.
+  const iw = Math.max(4, w - 2)
   const room = fit(surface.rows)
   const drag = surface.state?.drag
   const over = drag === undefined ? undefined : hit(props, surface.columns, surface.rows, drag.x, drag.y)
@@ -92,28 +104,61 @@ const Board: ClientModule<BoardProps, S> = (props, surface) => {
         const isTarget = over !== undefined && over.col === ci && !(drag !== undefined && drag.fromCol === ci && over.idx === drag.fromIdx)
         const shown = col.cards.slice(0, room)
         const hidden = col.cards.length - shown.length
+        const dropAt = isTarget ? over?.idx : undefined
         return (
-          <Box key={col.key} flexDirection="column" width={w}>
-            <Text bold inverse={isTarget} wrap="truncate-end">
-              {` ${col.name} ${col.count}`}
-            </Text>
-            <Text dimColor wrap="truncate-end">{'─'.repeat(Math.max(1, w - 1))}</Text>
+          <Box
+            key={col.key}
+            flexDirection="column"
+            width={w}
+            height={surface.rows}
+            overflow="hidden"
+            borderStyle="round"
+            borderColor={isTarget ? 'suggestion' : 'subtle'}
+            borderDimColor={!isTarget}
+          >
+            <Box key={`${col.key}-head`} flexDirection="row" width={iw} justifyContent="space-between">
+              <Text bold color={col.tone} underline={dropAt === 0 && shown.length === 0} wrap="truncate-end">
+                {`${col.name} `}
+              </Text>
+              <Text color="inverseText" backgroundColor={isTarget ? 'suggestion' : col.tone}>{` ${col.count} `}</Text>
+            </Box>
             {shown.map((card, i) => {
               const dragging = drag?.id === card.id
-              const dropHere = isTarget && over?.idx === i
+              const stripe = card.selected ? '█' : '▌'
               return (
-                <Box key={card.id} flexDirection="column" width={w}>
-                  <Text bold={card.selected} color={card.colour} dimColor={dragging} underline={dropHere} wrap="truncate-end">
-                    {`${card.flag === '' ? ' ' : card.flag}${card.title}`}
-                  </Text>
-                  <Text dimColor wrap="truncate-end">{` ${card.meta}`}</Text>
-                  <Text> </Text>
+                <Box key={card.id} flexDirection="column" width={iw}>
+                  <Box key={`${card.id}-face`} flexDirection="column" width={iw} hover={{ backgroundColor: 'inactive' }}>
+                    <Box flexDirection="row" width={iw}>
+                      <Text color={card.colour} dimColor={dragging}>{stripe}</Text>
+                      <Text bold color={card.flagTone}>{card.flag === '' ? ' ' : card.flag}</Text>
+                      <Text
+                        bold={card.selected}
+                        dimColor={dragging}
+                        underline={dropAt === i}
+                        color={dropAt === i ? 'suggestion' : undefined}
+                        wrap="truncate-end"
+                      >
+                        {card.title}
+                      </Text>
+                    </Box>
+                    <Box flexDirection="row" width={iw}>
+                      <Text color={card.colour} dimColor={dragging}>{stripe}</Text>
+                      <Text dimColor wrap="truncate-end">{` ${card.meta}`}</Text>
+                    </Box>
+                  </Box>
+                  {dropAt === i + 1 ? (
+                    <Text color="suggestion" wrap="truncate-end">{'─'.repeat(iw)}</Text>
+                  ) : (
+                    <Text> </Text>
+                  )}
                 </Box>
               )
             })}
             {hidden > 0 && <Text dimColor wrap="truncate-end">{` +${hidden} more`}</Text>}
-            {isTarget && over !== undefined && over.idx >= shown.length && (
-              <Text dimColor wrap="truncate-end">{' ▸ drop here'}</Text>
+            {shown.length === 0 && (
+              <Text color={isTarget ? 'suggestion' : undefined} dimColor={!isTarget} italic wrap="truncate-end">
+                {isTarget ? ' ▸ drop here' : ' empty'}
+              </Text>
             )}
           </Box>
         )

@@ -1,7 +1,7 @@
 // Kanbot: a global kanban board in Claude Code that hands queued cards to
 // background Claude agents across your projects.
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderChildren } from 'claude-code'
 
 import type { Column, Project, ProjectDraft, Tab } from '../types'
 import type { BoardProps } from './board-client'
@@ -46,6 +46,7 @@ import {
   rankAt,
   statusLine,
 } from './model'
+import { COLUMN_TONE, flagTone, svgBar, textBar } from './style'
 
 const TAB = atom({ plugin: 'kanbot', key: 'tab' } as const, 'board')
 const SELECTED = atom({ plugin: 'kanbot', key: 'selected' } as const, '')
@@ -248,6 +249,8 @@ export const register: Register = on => {
       return <Text>Kanbot's board needs the terminal or the Code tab of the desktop app.</Text>
     }
     const { Input, Select, Markdown, Client } = $.ui.resolve(e)
+    // Svg is drawn by the desktop only; the terminal gets text bars instead.
+    const Svg = e.surface === 'desktop' ? $.ui.resolve(e).Svg : undefined
     await read($, REV)
     const tab = await read($, TAB)
     const board = await loadBoard($)
@@ -259,23 +262,64 @@ export const register: Register = on => {
     }
     const width = e.props.bodyColumns ?? e.viewport?.columns ?? 100
 
-    const ds = dispatcherState(board, now)
-    const who =
-      ds === 'mine'
-        ? board.dispatcher?.isPaused === true ? 'dispatching here · paused' : 'dispatching here'
-        : ds === 'other'
-          ? 'dispatched by another session'
-          : ds === 'stale'
-            ? 'dispatcher gone: run /kanbot work'
-            : 'no dispatcher: run /kanbot work'
+    const isDesktop = e.surface === 'desktop'
+    /** A small filled label: a status, a project, a column. */
+    const chip = (key: string, text: string, tone: string) => (
+      <Text key={key} color="inverseText" backgroundColor={tone} wrap="truncate-end">{` ${text} `}</Text>
+    )
+    /** A bordered section with a heading. */
+    const panel = (key: string, title: string, children: RenderChildren, tone = 'subtle') => (
+      <Box key={key} flexDirection="column" borderStyle="round" borderColor={tone} borderDimColor={tone === 'subtle'} paddingX={1} marginTop={1}>
+        <Text size="footnote" weight="semibold" color={tone === 'subtle' ? 'subtle' : tone}>{title.toUpperCase()}</Text>
+        {children}
+      </Box>
+    )
 
-    const tabs = (
-      <Box flexDirection="row" columnGap={3}>
-        <Button key="tab-board" label="Board" hotkey="b" plain dimColor={tab !== 'board'} onPress={go('board')} />
-        <Button key="tab-card" label="Card" hotkey="c" plain dimColor={tab !== 'card'} onPress={go('card')} />
-        <Button key="tab-projects" label="Projects" hotkey="p" plain dimColor={tab !== 'projects'} onPress={go('projects')} />
-        <Button key="tab-activity" label="Activity" hotkey="a" plain dimColor={tab !== 'activity'} onPress={go('activity')} />
-        <Text dimColor wrap="truncate-end">{who}</Text>
+    const ds = dispatcherState(board, now)
+    const paused = board.dispatcher?.isPaused === true
+    const [who, whoTone] =
+      ds === 'mine'
+        ? paused ? ['● paused here', 'warning'] : ['● dispatching here', 'success']
+        : ds === 'other'
+          ? ['● dispatched elsewhere', 'suggestion']
+          : ds === 'stale'
+            ? ['○ dispatcher gone', 'error']
+            : ['○ no dispatcher', 'error']
+    const tally = counts(board.cards)
+
+    const tabButton = (t: Tab, label: string, hotkey: string) => {
+      const active = tab === t
+      return isDesktop ? (
+        <Button key={`tab-${t}`} label={label} hotkey={hotkey} variant={active ? 'primary' : 'secondary'} onPress={go(t)} />
+      ) : (
+        <Button key={`tab-${t}`} hotkey={hotkey} plain dimColor={!active} onPress={go(t)}>
+          <Text bold={active} color={active ? 'claude' : undefined} underline={active}>
+            {label}
+          </Text>
+        </Button>
+      )
+    }
+
+    const titleBar = (
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center" flexWrap="wrap" columnGap={2}>
+        <Box flexDirection="row" alignItems="center" columnGap={2}>
+          <Text size="title" weight="bold" color="claude">
+            ◆ Kanbot
+          </Text>
+          <Box flexDirection="row" columnGap={2} borderStyle="round" borderColor="subtle" borderDimColor paddingX={1}>
+            {tabButton('board', 'Board', 'b')}
+            {tabButton('card', 'Card', 'c')}
+            {tabButton('projects', 'Projects', 'p')}
+            {tabButton('activity', 'Activity', 'a')}
+          </Box>
+        </Box>
+        <Box flexDirection="row" alignItems="center" columnGap={1}>
+          {tally.waiting > 0 && chip('chip-waiting', `${tally.waiting} waiting on you`, 'warning')}
+          <Text size="footnote" dimColor tabular wrap="truncate-end">
+            {`${tally.running} running · ${tally.queued} queued · ${tally.review} review`}
+          </Text>
+          {chip('chip-dispatcher', who, whoTone)}
+        </Box>
       </Box>
     )
 
@@ -287,19 +331,23 @@ export const register: Register = on => {
 
     return (
       <Box flexDirection="column">
-        {tabs}
-        <Text> </Text>
+        {titleBar}
         {body}
       </Box>
     )
 
     async function boardTab() {
       if (board.projects.length === 0) {
-        return (
-          <Box flexDirection="column">
-            <Text>No projects yet. A project points Kanbot at a repo folder or a plain working folder.</Text>
-            <Button key="go-projects" label="Set up a project" variant="primary" onPress={go('projects')} />
-          </Box>
+        return panel(
+          'welcome',
+          'Get started',
+          <Box flexDirection="column" rowGap={1}>
+            <Text wrap="wrap">No projects yet. A project points Kanbot at a repo, a workspace of repos, or a plain working folder.</Text>
+            <Box flexDirection="row">
+              <Button key="go-projects" label="Set up a project" variant="primary" onPress={go('projects')} />
+            </Box>
+          </Box>,
+          'claude',
         )
       }
       const filter = await read($, FILTER)
@@ -310,22 +358,24 @@ export const register: Register = on => {
         return {
           key: col,
           name: COLUMN_NAMES[col],
+          tone: COLUMN_TONE[col],
           count: list.length,
           cards: list.slice(0, 40).map(c => ({
             id: c.id,
             title: c.title,
             meta: cardMeta(c, projectName(c.projectId), now),
             flag: cardFlag(c, now),
+            flagTone: flagTone(cardFlag(c, now)),
             colour: board.projects.find(p => p.id === c.projectId)?.colour ?? 'white',
             selected: c.id === selected,
           })),
         }
       })
-      const rows = Math.max(12, (e.viewport?.rows ?? 30) - 10)
+      const rows = Math.max(12, (e.viewport?.rows ?? 30) - 11)
       const options = [{ value: 'all', label: 'All projects' }, ...board.projects.map(p => ({ value: p.id, label: p.name }))]
       return (
         <Box flexDirection="column">
-          <Box flexDirection="row" columnGap={2}>
+          <Box flexDirection="row" columnGap={2} marginTop={1} alignItems="center">
             <Select key="filter" label="Show" options={options} value={filter} onSelect={v => void update($, FILTER, () => v)} />
             <Input
               key="new-card"
@@ -348,10 +398,11 @@ export const register: Register = on => {
               }}
             />
           </Box>
-          <Text> </Text>
-          <Client key="board" module="./board-client.tsx" props={{ cols }} width="100%" height={rows} />
-          <Text dimColor wrap="truncate-end">
-            Drag cards between columns. Click a card to open it. Backlog → Queued starts it; Review → Done merges it.
+          <Box marginTop={1}>
+            <Client key="board" module="./board-client.tsx" props={{ cols }} width="100%" height={rows} />
+          </Box>
+          <Text size="footnote" dimColor wrap="truncate-end">
+            Drag cards between columns · click to open · Backlog → Queued starts a card · Review → Done merges it
           </Text>
         </Box>
       )
@@ -361,7 +412,7 @@ export const register: Register = on => {
       const id = await read($, SELECTED)
       const card = board.cards.find(c => c.id === id)
       if (card === undefined) {
-        return <Text dimColor>Click a card on the Board to open it here.</Text>
+        return panel('no-card', 'Card', <Text dimColor>Click a card on the Board to open it here.</Text>)
       }
       const project = board.projects.find(p => p.id === card.projectId)
       const move = (to: Column) => async () => toast(await applyUserMove($, await loadBoard($), card.id, to, undefined, typing.get(`note-${card.id}`)))
@@ -376,7 +427,7 @@ export const register: Register = on => {
         actions.push(<Button key="act-queue" label="Queue" hotkey="q" variant="primary" onPress={move('queued')} />)
         actions.push(
           <Button
-            key="act-delete"
+            key="act-delete" variant="secondary"
             label="Delete"
             onPress={async () => {
               await deleteCard($, card)
@@ -385,13 +436,13 @@ export const register: Register = on => {
           />,
         )
       }
-      if (card.column === 'queued') actions.push(<Button key="act-unqueue" label="Back to Backlog" onPress={move('backlog')} />)
+      if (card.column === 'queued') actions.push(<Button key="act-unqueue" variant="secondary" label="Back to Backlog" onPress={move('backlog')} />)
       if (card.column === 'backlog' || card.column === 'queued') {
-        actions.push(<Button key="act-up" label="Up" hotkey="u" onPress={nudge(-1)} />)
-        actions.push(<Button key="act-down" label="Down" hotkey="d" onPress={nudge(1)} />)
+        actions.push(<Button key="act-up" variant="secondary" label="Up" hotkey="u" onPress={nudge(-1)} />)
+        actions.push(<Button key="act-down" variant="secondary" label="Down" hotkey="d" onPress={nudge(1)} />)
         actions.push(
           <Button
-            key="act-mode"
+            key="act-mode" variant="secondary"
             label={card.mode === 'sequential' ? 'Make parallel' : 'Make sequential'}
             onPress={() => void patchCard($, card.id, c => ({ ...c, mode: c.mode === 'sequential' ? 'parallel' : 'sequential' }))}
           />,
@@ -399,156 +450,216 @@ export const register: Register = on => {
       }
       if (card.column === 'review' && card.run?.phase !== 'merge') {
         actions.push(<Button key="act-done" label={card.mergeRequested === true ? 'Merge queued' : 'Done'} hotkey="y" variant="primary" onPress={move('done')} />)
-        actions.push(<Button key="act-back" label="Send back" onPress={move('queued')} />)
-        actions.push(<Button key="act-discard" label="Discard" onPress={move('backlog')} />)
+        actions.push(<Button key="act-back" variant="secondary" label="Send back" onPress={move('queued')} />)
+        actions.push(<Button key="act-discard" variant="secondary" label="Discard" onPress={move('backlog')} />)
       }
       const editable = card.column === 'backlog' || card.column === 'queued' || card.column === 'review'
+      const progress = card.progress
+      const stats = [
+        card.activity !== undefined ? `${card.activity.toolCalls} tool calls` : '',
+        card.activity !== undefined ? `last ${card.activity.lastTool} ${ago(now - card.activity.lastAt)} ago` : '',
+        card.activity !== undefined ? `${Math.round(card.activity.tokens / 1000)}k tokens` : '',
+        card.run !== undefined ? `${card.run.phase === 'merge' ? 'merging' : 'running'} for ${ago(now - card.run.startedAt)}` : '',
+      ].filter(s => s !== '')
       return (
-        <Box flexDirection="column">
-          <Text bold color={project?.colour} wrap="wrap">
-            {card.title}
-          </Text>
-          <Text dimColor wrap="truncate-end">
-            {`${card.id} · ${project?.name ?? '?'} · ${COLUMN_NAMES[card.column]} · ${card.mode}${card.branch !== undefined ? ` · ${card.branch}` : ''}`}
-          </Text>
-          {card.waiting !== undefined && card.waiting !== '' && <Text color="yellow" wrap="wrap">{`! ${card.waiting}`}</Text>}
-          {card.problem !== undefined && card.problem !== '' && <Text color="red" wrap="wrap">{`× ${card.problem}`}</Text>}
-          <Text> </Text>
+        <Box flexDirection="column" marginTop={1}>
+          <Box flexDirection="row" columnGap={1}>
+            <Text color={project?.colour}>▌</Text>
+            <Text size="heading" weight="bold" wrap="wrap">
+              {card.title}
+            </Text>
+          </Box>
+          <Box flexDirection="row" columnGap={1} flexWrap="wrap" marginTop={1}>
+            {chip('chip-project', project?.name ?? '?', project?.colour ?? 'subtle')}
+            {chip('chip-column', COLUMN_NAMES[card.column], COLUMN_TONE[card.column])}
+            {chip('chip-mode', card.mode === 'parallel' ? '∥ parallel' : '→ sequential', 'subtle')}
+            <Text size="footnote" dimColor mono wrap="truncate-middle">
+              {`${card.id}${card.branch !== undefined ? ` · ${card.branch}` : ''}`}
+            </Text>
+          </Box>
+          {card.waiting !== undefined && card.waiting !== '' && (
+            <Box borderStyle="round" borderColor="warning" paddingX={1} marginTop={1}>
+              <Text color="warning" wrap="wrap">{`! Waiting on you: ${card.waiting}`}</Text>
+            </Box>
+          )}
+          {card.problem !== undefined && card.problem !== '' && (
+            <Box borderStyle="round" borderColor="error" paddingX={1} marginTop={1}>
+              <Text color="error" wrap="wrap">{`× ${card.problem}`}</Text>
+            </Box>
+          )}
           {actions.length > 0 && (
-            <Box flexDirection="row" columnGap={2} flexWrap="wrap">
+            <Box flexDirection="row" columnGap={2} rowGap={1} flexWrap="wrap" marginTop={1}>
               {actions}
             </Box>
           )}
           {card.column === 'review' && card.run?.phase !== 'merge' && (
-            <Input
-              key={`note-${card.id}`}
-              label="Note for Send back"
-              placeholder="What should Claude change?"
-              value={typing.get(`note-${card.id}`) ?? ''}
-              submitLabel="send back"
-              onInput={v => typing.set(`note-${card.id}`, v)}
-              onSubmit={async v => {
-                typing.delete(`note-${card.id}`)
-                toast(await applyUserMove($, await loadBoard($), card.id, 'queued', undefined, v))
-              }}
-            />
-          )}
-          {project?.type === 'workspace' && (
-            <Box flexDirection="column">
-              <Text> </Text>
-              <Text bold>{`Repos${card.repos === undefined || card.repos.length === 0 ? ' (all)' : ''}`}</Text>
-              <Box flexDirection="row" columnGap={2} flexWrap="wrap">
-                {(project.repos ?? []).map(r => {
-                  const picked = card.repos === undefined || card.repos.length === 0 || card.repos.includes(r.name)
-                  const canPick = card.column === 'backlog' || card.column === 'queued'
-                  return canPick ? (
-                    <Button
-                      key={`repo-${card.id}-${r.name}`}
-                      plain
-                      onPress={() =>
-                        void patchCard($, card.id, c => {
-                          const all = (project.repos ?? []).map(x => x.name)
-                          const now = c.repos === undefined || c.repos.length === 0 ? all : c.repos
-                          const next = now.includes(r.name) ? now.filter(n => n !== r.name) : [...now, r.name]
-                          return { ...c, repos: next.length === 0 || next.length === all.length ? undefined : next }
-                        })
-                      }
-                    >
-                      <Text bold={picked} dimColor={!picked}>{`${picked ? '[x]' : '[ ]'} ${r.name}`}</Text>
-                    </Button>
-                  ) : (
-                    <Text key={`repo-${card.id}-${r.name}`} dimColor={!picked}>{`${picked ? '[x]' : '[ ]'} ${r.name}`}</Text>
-                  )
-                })}
-              </Box>
-              {card.mergeRepos !== undefined && card.mergeRepos.length > 0 && (
-                <Text color="yellow" wrap="wrap">{`Still to merge: ${card.mergeRepos.join(', ')}`}</Text>
-              )}
+            <Box marginTop={1}>
+              <Input
+                key={`note-${card.id}`}
+                label="Note for Send back"
+                placeholder="What should Claude change?"
+                value={typing.get(`note-${card.id}`) ?? ''}
+                submitLabel="send back"
+                onInput={v => typing.set(`note-${card.id}`, v)}
+                onSubmit={async v => {
+                  typing.delete(`note-${card.id}`)
+                  toast(await applyUserMove($, await loadBoard($), card.id, 'queued', undefined, v))
+                }}
+              />
             </Box>
           )}
-          <Text> </Text>
-          <Text bold>Brief</Text>
-          {editable ? (
-            <Input
-              key={`brief-${card.id}`}
-              label="Brief"
-              rows={4}
-              placeholder="What Claude should do"
-              value={typing.get(`brief-${card.id}`) ?? card.brief}
-              submitLabel="save"
-              onInput={v => typing.set(`brief-${card.id}`, v)}
-              onSubmit={async v => {
-                typing.delete(`brief-${card.id}`)
-                await patchCard($, card.id, c => ({ ...c, brief: v }))
-              }}
-            />
-          ) : (
-            <Markdown key={`brief-md-${card.id}`} text={card.brief === '' ? card.title : card.brief} />
+          {project?.type === 'workspace' &&
+            panel(
+              'sec-repos',
+              `Repos${card.repos === undefined || card.repos.length === 0 ? ' · all' : ''}`,
+              <Box flexDirection="column">
+                <Box flexDirection="row" columnGap={2} flexWrap="wrap">
+                  {(project.repos ?? []).map(r => {
+                    const picked = card.repos === undefined || card.repos.length === 0 || card.repos.includes(r.name)
+                    const canPick = card.column === 'backlog' || card.column === 'queued'
+                    const label = `${picked ? '☑' : '☐'} ${r.name}`
+                    return canPick ? (
+                      <Button
+                        key={`repo-${card.id}-${r.name}`}
+                        plain
+                        onPress={() =>
+                          void patchCard($, card.id, c => {
+                            const all = (project.repos ?? []).map(x => x.name)
+                            const now = c.repos === undefined || c.repos.length === 0 ? all : c.repos
+                            const next = now.includes(r.name) ? now.filter(n => n !== r.name) : [...now, r.name]
+                            return { ...c, repos: next.length === 0 || next.length === all.length ? undefined : next }
+                          })
+                        }
+                      >
+                        <Text bold={picked} color={picked ? 'success' : undefined} dimColor={!picked}>
+                          {label}
+                        </Text>
+                      </Button>
+                    ) : (
+                      <Text key={`repo-${card.id}-${r.name}`} bold={picked} color={picked ? 'success' : undefined} dimColor={!picked}>
+                        {label}
+                      </Text>
+                    )
+                  })}
+                </Box>
+                {card.mergeRepos !== undefined && card.mergeRepos.length > 0 && (
+                  <Text color="warning" wrap="wrap">{`Still to merge: ${card.mergeRepos.join(', ')}`}</Text>
+                )}
+              </Box>,
+            )}
+          {panel(
+            'sec-brief',
+            'Brief',
+            editable ? (
+              <Input
+                key={`brief-${card.id}`}
+                placeholder="What Claude should do"
+                value={typing.get(`brief-${card.id}`) ?? card.brief}
+                submitLabel="save"
+                onInput={v => typing.set(`brief-${card.id}`, v)}
+                onSubmit={async v => {
+                  typing.delete(`brief-${card.id}`)
+                  await patchCard($, card.id, c => ({ ...c, brief: v }))
+                }}
+              />
+            ) : (
+              <Markdown key={`brief-md-${card.id}`} text={card.brief === '' ? card.title : card.brief} />
+            ),
           )}
-          <Text> </Text>
-          <Text bold>{`Acceptance (${card.acceptance.length})`}</Text>
-          {card.acceptance.map((item, i) => (
-            <Box key={`acc-${i}`} flexDirection="row" columnGap={1}>
+          {panel(
+            'sec-acceptance',
+            `Acceptance · ${card.acceptance.length}`,
+            <Box flexDirection="column">
+              {card.acceptance.length === 0 && !editable && <Text dimColor>None.</Text>}
+              {card.acceptance.map((item, i) => (
+                <Box key={`acc-${i}`} flexDirection="row" columnGap={1}>
+                  <Text color="success">✓</Text>
+                  <Box flexGrow={1}>
+                    <Text wrap="wrap">{item}</Text>
+                  </Box>
+                  {editable && (
+                    <Button
+                      key={`acc-x-${card.id}-${i}`}
+                      label="✕"
+                      plain
+                      dimColor
+                      onPress={() => void patchCard($, card.id, c => ({ ...c, acceptance: c.acceptance.filter((_, j) => j !== i) }))}
+                    />
+                  )}
+                </Box>
+              ))}
               {editable && (
-                <Button
-                  key={`acc-x-${card.id}-${i}`}
-                  label="x"
-                  plain
-                  onPress={() => void patchCard($, card.id, c => ({ ...c, acceptance: c.acceptance.filter((_, j) => j !== i) }))}
+                <Input
+                  key={`acc-new-${card.id}`}
+                  label="Add"
+                  placeholder="A check Claude must satisfy"
+                  value={typing.get(`acc-${card.id}`) ?? ''}
+                  submitLabel="add"
+                  onInput={v => typing.set(`acc-${card.id}`, v)}
+                  onSubmit={async v => {
+                    typing.delete(`acc-${card.id}`)
+                    if (v.trim() === '') return
+                    await patchCard($, card.id, c => ({ ...c, acceptance: [...c.acceptance, v.trim()] }))
+                  }}
                 />
               )}
-              <Text wrap="wrap">{`- ${item}`}</Text>
-            </Box>
-          ))}
-          {editable && (
-            <Input
-              key={`acc-new-${card.id}`}
-              label="Add"
-              placeholder="A check Claude must satisfy"
-              value={typing.get(`acc-${card.id}`) ?? ''}
-              submitLabel="add"
-              onInput={v => typing.set(`acc-${card.id}`, v)}
-              onSubmit={async v => {
-                typing.delete(`acc-${card.id}`)
-                if (v.trim() === '') return
-                await patchCard($, card.id, c => ({ ...c, acceptance: [...c.acceptance, v.trim()] }))
-              }}
-            />
+            </Box>,
           )}
-          {card.notes.length > 0 && (
+          {card.notes.length > 0 &&
+            panel(
+              'sec-notes',
+              'Review notes',
+              <Box flexDirection="column">
+                {card.notes.map((n, i) => (
+                  <Text key={`note-${i}`} wrap="wrap">{`- ${n}`}</Text>
+                ))}
+              </Box>,
+              'warning',
+            )}
+          {panel(
+            'sec-progress',
+            'Progress',
             <Box flexDirection="column">
-              <Text> </Text>
-              <Text bold>Review notes</Text>
-              {card.notes.map((n, i) => (
-                <Text key={`note-${i}`} wrap="wrap">{`- ${n}`}</Text>
+              {progress !== undefined && progress.total > 0 ? (
+                <Box flexDirection="row" columnGap={1} alignItems="center">
+                  {Svg !== undefined ? (
+                    <Svg source={svgBar(progress.done, progress.total)} alt={`${progress.done} of ${progress.total} steps done`} width={240} height={8} />
+                  ) : (
+                    <Text color="claude">{textBar(progress.done, progress.total, 20)}</Text>
+                  )}
+                  <Text tabular>{`${progress.done}/${progress.total} steps`}</Text>
+                </Box>
+              ) : (
+                <Text dimColor>No steps yet.</Text>
+              )}
+              {stats.length > 0 && (
+                <Text size="footnote" dimColor tabular wrap="wrap">
+                  {stats.join(' · ')}
+                </Text>
+              )}
+            </Box>,
+          )}
+          {card.summary !== undefined &&
+            card.summary !== '' &&
+            panel('sec-summary', 'Summary from Claude', <Markdown key={`summary-${card.id}`} text={card.summary} />, 'claude')}
+          {panel(
+            'sec-history',
+            'History',
+            <Box flexDirection="column">
+              {card.history.slice(-8).map((entry, i) => (
+                <Box key={`h-${i}`} flexDirection="row" columnGap={1}>
+                  <Box width={5}>
+                    <Text size="footnote" dimColor tabular>
+                      {ago(now - entry.at)}
+                    </Text>
+                  </Box>
+                  <Text size="footnote" wrap="truncate-end">
+                    {entry.text}
+                  </Text>
+                </Box>
               ))}
-            </Box>
+            </Box>,
           )}
-          <Text> </Text>
-          <Text bold>Progress</Text>
-          <Text dimColor wrap="wrap">
-            {[
-              card.progress !== undefined ? `${card.progress.done}/${card.progress.total} steps` : 'no steps yet',
-              card.activity !== undefined
-                ? `${card.activity.toolCalls} tool calls · last ${card.activity.lastTool} ${ago(now - card.activity.lastAt)} ago · ${Math.round(card.activity.tokens / 1000)}k tokens`
-                : '',
-              card.run !== undefined ? `${card.run.phase === 'merge' ? 'merging' : 'running'} for ${ago(now - card.run.startedAt)}` : '',
-            ]
-              .filter(s => s !== '')
-              .join(' · ')}
-          </Text>
-          {card.summary !== undefined && card.summary !== '' && (
-            <Box flexDirection="column">
-              <Text> </Text>
-              <Text bold>Summary from Claude</Text>
-              <Markdown key={`summary-${card.id}`} text={card.summary} />
-            </Box>
-          )}
-          <Text> </Text>
-          <Text bold>History</Text>
-          {card.history.slice(-8).map((entry, i) => (
-            <Text key={`h-${i}`} dimColor wrap="truncate-end">{`${ago(now - entry.at)} ago  ${entry.text}`}</Text>
-          ))}
         </Box>
       )
     }
@@ -606,111 +717,188 @@ export const register: Register = on => {
         await clear()
       }
       const cap = board.settings.globalCap
+      /** One row of the form: the label in a fixed column, the control beside it. */
+      const field = (key: string, label: string, control: RenderChildren) => (
+        <Box key={key} flexDirection="row" columnGap={2} alignItems="center">
+          <Box width={16} flexShrink={0}>
+            <Text dimColor wrap="truncate-end">
+              {label}
+            </Text>
+          </Box>
+          <Box flexGrow={1}>{control}</Box>
+        </Box>
+      )
       return (
         <Box flexDirection="column">
-          <Text bold>Projects</Text>
-          {board.projects.length === 0 && <Text dimColor>None yet.</Text>}
-          {board.projects.map(p => {
-            const open = board.cards.filter(c => c.projectId === p.id && c.column !== 'done').length
-            return (
-              <Box key={`proj-${p.id}`} flexDirection="row" columnGap={2}>
-                <Button key={`proj-edit-${p.id}`} plain onPress={edit(p)}>
-                  <Text color={p.colour} bold={p.id === editing}>
-                    {p.name}
-                  </Text>
-                </Button>
-                <Text dimColor wrap="truncate-middle">
-                  {`${p.type} · ${p.path}${
-                    p.type === 'repo'
-                      ? ` · ${p.baseBranch} · max ${p.maxParallel}`
-                      : p.type === 'workspace'
-                        ? ` · ${(p.repos ?? []).length} repos: ${(p.repos ?? []).map(r => `${r.name} (${r.baseBranch})`).join(', ')} · max ${p.maxParallel}`
-                        : ''
-                  } · ${open} open`}
+          {panel(
+            'sec-projects',
+            `Projects · ${board.projects.length}`,
+            <Box flexDirection="column">
+              {board.projects.length === 0 && <Text dimColor>None yet.</Text>}
+              {board.projects.map(p => {
+                const open = board.cards.filter(c => c.projectId === p.id && c.column !== 'done').length
+                const running = board.cards.filter(c => c.projectId === p.id && c.column === 'running').length
+                const detail =
+                  p.type === 'repo'
+                    ? `base ${p.baseBranch} · up to ${p.maxParallel} in parallel`
+                    : p.type === 'workspace'
+                      ? `${(p.repos ?? []).length} repos: ${(p.repos ?? []).map(r => `${r.name} (${r.baseBranch})`).join(', ')} · up to ${p.maxParallel} in parallel`
+                      : 'one card at a time · no git'
+                return (
+                  <Box
+                    key={`proj-${p.id}`}
+                    flexDirection="column"
+                    borderStyle="round"
+                    borderColor={p.id === editing ? 'suggestion' : p.colour}
+                    borderDimColor={p.id !== editing}
+                    hover={{ borderColor: 'suggestion', borderDimColor: false }}
+                    paddingX={1}
+                  >
+                    <Box flexDirection="row" justifyContent="space-between" columnGap={1}>
+                      <Box flexDirection="row" columnGap={1} alignItems="center">
+                        <Button key={`proj-edit-${p.id}`} plain onPress={edit(p)}>
+                          <Text color={p.colour} bold>
+                            {p.name}
+                          </Text>
+                        </Button>
+                        {chip(`proj-type-${p.id}`, p.type, 'subtle')}
+                      </Box>
+                      <Box flexDirection="row" columnGap={1}>
+                        {running > 0 && chip(`proj-run-${p.id}`, `${running} running`, 'claude')}
+                        <Text dimColor tabular>{`${open} open`}</Text>
+                      </Box>
+                    </Box>
+                    <Text size="footnote" dimColor mono wrap="truncate-middle">
+                      {p.path}
+                    </Text>
+                    <Text size="footnote" dimColor wrap="wrap">
+                      {detail}
+                    </Text>
+                  </Box>
+                )
+              })}
+              {board.projects.length > 0 && (
+                <Text size="footnote" dimColor>
+                  Click a project's name to edit it.
+                </Text>
+              )}
+            </Box>,
+          )}
+          {panel(
+            'sec-form',
+            editing === '' ? 'New project' : `Edit ${draft.name}`,
+            <Box flexDirection="column" rowGap={1}>
+              {field('f-name', 'Name', <Input key="pf-name" placeholder="IdeaJudge" value={draft.name} onInput={set('name')} onSubmit={save} />)}
+              {field(
+                'f-type',
+                'Type',
+                <Select
+                  key="pf-type"
+                  options={[
+                    { value: 'repo', label: 'Repo: a git repository; cards get branches and are merged on Done' },
+                    { value: 'workspace', label: 'Workspace: a parent folder of several repos; cards can change any of them' },
+                    { value: 'chat', label: 'Chat: a plain folder; cards run one at a time, no git' },
+                  ]}
+                  value={draft.type}
+                  onSelect={v =>
+                    void update($, DRAFT, (d): ProjectDraft => ({ ...d, type: v === 'chat' ? 'chat' : v === 'workspace' ? 'workspace' : 'repo' }))
+                  }
+                />,
+              )}
+              {field(
+                'f-path',
+                'Folder',
+                <Input key="pf-path" placeholder="/Users/you/work/project (absolute)" value={draft.path} onInput={set('path')} onSubmit={save} />,
+              )}
+              {draft.type === 'repo' &&
+                field(
+                  'f-base',
+                  'Base branch',
+                  <Input key="pf-base" placeholder="main" value={draft.baseBranch} onInput={set('baseBranch')} onSubmit={save} />,
+                )}
+              {draft.type !== 'chat' &&
+                field(
+                  'f-max',
+                  'Max parallel',
+                  <Input key="pf-max" placeholder="2" value={draft.maxParallel} onInput={set('maxParallel')} onSubmit={save} />,
+                )}
+              {draft.type !== 'chat' &&
+                field(
+                  'f-test',
+                  'Test command',
+                  <Input
+                    key="pf-test"
+                    placeholder={draft.type === 'workspace' ? 'optional; run in each merged repo where it applies' : 'npm test (optional, run after merging)'}
+                    value={draft.testCommand}
+                    onInput={set('testCommand')}
+                    onSubmit={save}
+                  />,
+                )}
+              {draft.type === 'workspace' && (
+                <Text size="footnote" dimColor wrap="wrap">
+                  Kanbot finds the git repos directly inside the folder, and each repo's base branch, when you save. Save again later to pick up new repos.
+                </Text>
+              )}
+              <Box flexDirection="row" columnGap={2}>
+                <Button key="pf-save" label="Save" variant="primary" onPress={save} />
+                {editing !== '' && <Button key="pf-new" label="New project" variant="secondary" onPress={clear} />}
+                {editing !== '' && (
+                  <Button
+                    key="pf-remove"
+                    label="Remove"
+                    variant="secondary"
+                    onPress={async () => {
+                      const fresh = await loadBoard($)
+                      const p = fresh.projects.find(x => x.id === editing)
+                      if (p === undefined) return
+                      const said = await removeProject($, p, fresh)
+                      if (said !== undefined) $.ui.toast(said)
+                      else await clear()
+                    }}
+                  />
+                )}
+              </Box>
+            </Box>,
+            editing === '' ? 'subtle' : 'suggestion',
+          )}
+          {panel(
+            'sec-dispatcher',
+            'Dispatcher',
+            <Box flexDirection="column" rowGap={1}>
+              <Box flexDirection="row" columnGap={1} alignItems="center">
+                {chip('disp-chip', who, whoTone)}
+                <Text dimColor wrap="wrap">
+                  {ds === 'mine'
+                    ? 'This session runs the cards. Keep it open.'
+                    : 'Run /kanbot work in the session that should run cards. Keep it open; its agents inherit its permission mode.'}
                 </Text>
               </Box>
-            )
-          })}
-          <Text> </Text>
-          <Text bold>{editing === '' ? 'New project' : `Edit ${draft.name}`}</Text>
-          <Input key="pf-name" label="Name" placeholder="IdeaJudge" value={draft.name} onInput={set('name')} onSubmit={save} />
-          <Select
-            key="pf-type"
-            label="Type"
-            options={[
-              { value: 'repo', label: 'Repo: a git repository; cards get branches and are merged on Done' },
-              { value: 'workspace', label: 'Workspace: a parent folder of several repos; cards can change any of them' },
-              { value: 'chat', label: 'Chat: a plain folder; cards run one at a time, no git' },
-            ]}
-            value={draft.type}
-            onSelect={v =>
-              void update($, DRAFT, (d): ProjectDraft => ({ ...d, type: v === 'chat' ? 'chat' : v === 'workspace' ? 'workspace' : 'repo' }))
-            }
-          />
-          <Input key="pf-path" label="Folder" placeholder="/Users/you/work/project (absolute)" value={draft.path} onInput={set('path')} onSubmit={save} />
-          {draft.type === 'repo' && (
-            <Input key="pf-base" label="Base branch" placeholder="main" value={draft.baseBranch} onInput={set('baseBranch')} onSubmit={save} />
+              {field(
+                'f-cap',
+                'Running at once',
+                <Input
+                  key="cap"
+                  placeholder="4"
+                  value={typing.get('cap') ?? String(cap)}
+                  submitLabel="save"
+                  onInput={v => typing.set('cap', v)}
+                  onSubmit={async v => {
+                    typing.delete('cap')
+                    const n = Number.parseInt(v, 10)
+                    if (!Number.isFinite(n) || n < 1 || n > 16) {
+                      $.ui.toast('Use a number from 1 to 16.')
+                      return
+                    }
+                    await $.store.set('settings', { globalCap: n })
+                    await touch($)
+                  }}
+                />,
+              )}
+              <Text size="footnote" dimColor>
+                Across all projects, 1 to 16.
+              </Text>
+            </Box>,
           )}
-          {draft.type !== 'chat' && (
-            <Box flexDirection="column">
-              <Input key="pf-max" label="Max parallel" placeholder="2" value={draft.maxParallel} onInput={set('maxParallel')} onSubmit={save} />
-              <Input
-                key="pf-test"
-                label="Test command"
-                placeholder={draft.type === 'workspace' ? 'optional; run in each merged repo where it applies' : 'npm test (optional, run after merging)'}
-                value={draft.testCommand}
-                onInput={set('testCommand')}
-                onSubmit={save}
-              />
-            </Box>
-          )}
-          {draft.type === 'workspace' && (
-            <Text dimColor wrap="wrap">
-              Kanbot finds the git repos directly inside the folder, and each repo's base branch, when you save. Save again later to pick up new repos.
-            </Text>
-          )}
-          <Box flexDirection="row" columnGap={2}>
-            <Button key="pf-save" label="Save" variant="primary" onPress={save} />
-            {editing !== '' && <Button key="pf-new" label="New project" onPress={clear} />}
-            {editing !== '' && (
-              <Button
-                key="pf-remove"
-                label="Remove"
-                onPress={async () => {
-                  const fresh = await loadBoard($)
-                  const p = fresh.projects.find(x => x.id === editing)
-                  if (p === undefined) return
-                  const said = await removeProject($, p, fresh)
-                  if (said !== undefined) $.ui.toast(said)
-                  else await clear()
-                }}
-              />
-            )}
-          </Box>
-          <Text> </Text>
-          <Text bold>Dispatcher</Text>
-          <Text dimColor wrap="wrap">
-            {ds === 'mine'
-              ? 'This session runs the cards. Keep it open.'
-              : 'Run /kanbot work in the session that should run cards. Keep that session open; its agents inherit its permission mode.'}
-          </Text>
-          <Input
-            key="cap"
-            label="Most cards running at once (all projects)"
-            value={typing.get('cap') ?? String(cap)}
-            submitLabel="save"
-            onInput={v => typing.set('cap', v)}
-            onSubmit={async v => {
-              typing.delete('cap')
-              const n = Number.parseInt(v, 10)
-              if (!Number.isFinite(n) || n < 1 || n > 16) {
-                $.ui.toast('Use a number from 1 to 16.')
-                return
-              }
-              await $.store.set('settings', { globalCap: n })
-              await touch($)
-            }}
-          />
         </Box>
       )
     }
@@ -718,19 +906,30 @@ export const register: Register = on => {
     async function activityTab() {
       const list = (await readActivity($)).slice(-60).reverse()
       const titleOf = (id: string) => board.cards.find(c => c.id === id)?.title ?? id
-      return (
+      return panel(
+        'sec-activity',
+        'Activity',
         <Box flexDirection="column">
-          <Text bold>Activity</Text>
           {list.length === 0 && <Text dimColor>Nothing yet. Activity appears once the dispatcher runs cards.</Text>}
-          {list.map((a, i) => (
-            <Text key={`act-${i}`} wrap="truncate-end">
-              <Text dimColor>{`${ago(now - a.at).padStart(4)} `}</Text>
-              <Text color={board.projects.find(p => p.id === a.projectId)?.colour}>{`${projectName(a.projectId)} `}</Text>
-              <Text dimColor>{`${titleOf(a.cardId).slice(0, Math.max(10, Math.floor(width / 4)))}: `}</Text>
-              {a.text}
-            </Text>
-          ))}
-        </Box>
+          {list.map((a, i) => {
+            const colour = board.projects.find(p => p.id === a.projectId)?.colour
+            return (
+              <Box key={`act-${i}`} flexDirection="row" columnGap={1}>
+                <Box width={4} flexShrink={0}>
+                  <Text size="footnote" dimColor tabular>
+                    {ago(now - a.at)}
+                  </Text>
+                </Box>
+                <Text color={colour}>▌</Text>
+                <Text wrap="truncate-end">
+                  <Text color={colour} bold>{`${projectName(a.projectId)} `}</Text>
+                  <Text dimColor>{`${titleOf(a.cardId).slice(0, Math.max(10, Math.floor(width / 4)))} · `}</Text>
+                  {a.text}
+                </Text>
+              </Box>
+            )
+          })}
+        </Box>,
       )
     }
   })

@@ -36,6 +36,12 @@ const seed = () => ({
   'card:v1': card('v1', { column: 'review', title: 'Tidy README', summary: 'Rewrote the README.' }),
 })
 
+/** The number on a column's badge. */
+async function count(ui: { find: (q: { in: string; key: string }) => Promise<{ text?: string } | undefined> }, col: string) {
+  const text = (await ui.find({ in: 'board', key: `${col}-head` }))?.text ?? ''
+  return Number(/(\d+)\s*$/.exec(text)?.[1])
+}
+
 const PANE = {
   component: 'Pane' as const,
   requestId: 'kanbot',
@@ -50,9 +56,10 @@ describe('board pane', () => {
       const ui = await $.ui.mount({ plugin: 'kanbot', surface, ...PANE })
       await ui.resize({ columns: 100, rows: 20, in: 'board' })
       expect(await ui.find({ type: 'Client', key: 'board' })).toBeDefined()
-      for (const head of [/Backlog 1/, /Queued 0/, /Running 1/, /Review 1/, /Done 0/]) {
-        expect(await ui.find({ in: 'board', text: head })).toBeDefined()
+      for (const [col, n] of [['backlog', 1], ['queued', 0], ['running', 1], ['review', 1], ['done', 0]] as const) {
+        expect(await count(ui, col)).toBe(n)
       }
+      expect(await ui.find({ in: 'board', text: 'Backlog' })).toBeDefined()
       expect(await ui.find({ in: 'board', text: /Fix login/ })).toBeDefined()
       await ui.unmount()
     })
@@ -70,8 +77,8 @@ describe('board pane', () => {
       await ui.pointer({ type: 'down', x: 3, y: 2, button: 'left', in: 'board' })
       await ui.pointer({ type: 'move', x: 25, y: 3, button: 'left', in: 'board' })
       await ui.pointer({ type: 'up', x: 25, y: 3, button: 'left', in: 'board' })
-      expect(await ui.find({ in: 'board', text: /Queued 1/ })).toBeDefined()
-      expect(await ui.find({ in: 'board', text: /Backlog 0/ })).toBeDefined()
+      expect(await count(ui, 'queued')).toBe(1)
+      expect(await count(ui, 'backlog')).toBe(0)
       expect(toasts).toEqual([])
       await ui.unmount()
     })
@@ -88,7 +95,7 @@ describe('board pane', () => {
       await ui.pointer({ type: 'down', x: 43, y: 2, button: 'left', in: 'board' })
       await ui.pointer({ type: 'move', x: 65, y: 2, button: 'left', in: 'board' })
       await ui.pointer({ type: 'up', x: 65, y: 2, button: 'left', in: 'board' })
-      expect(await ui.find({ in: 'board', text: /Running 1/ })).toBeDefined()
+      expect(await count(ui, 'running')).toBe(1)
       expect(toasts.join(' ')).toContain('moves to Review by itself')
       await ui.unmount()
     })
@@ -113,7 +120,7 @@ describe('board pane', () => {
     await ui.pointer({ type: 'down', x: 63, y: 2, button: 'left', in: 'board' })
     await ui.pointer({ type: 'up', x: 63, y: 2, button: 'left', in: 'board' })
     await ui.input({ key: 'note-v1', text: 'Add a usage section' })
-    expect(await ui.find({ type: 'Text', text: /v1 · IdeaJudge · Queued/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /^ Queued $/ })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: '- Add a usage section' })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'act-unqueue' })).toBeDefined()
     await ui.unmount()
