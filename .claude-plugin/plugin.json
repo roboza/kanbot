@@ -1,0 +1,7 @@
+{
+  "name": "kanbot",
+  "version": "0.1.0",
+  "description": "A global kanban board in Claude Code that hands queued cards to background Claude agents across your projects",
+  "author": { "name": "Robert Oswald" },
+  "types": "./types/index.d.ts"
+}
