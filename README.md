@@ -9,6 +9,18 @@ A global kanban board inside Claude Code that hands queued cards to background C
 - **Cards** move Backlog → Queued → Running → Review → Done. You move cards into Queued and Done; Kanbot moves the rest.
 - **One dispatcher session** starts queued cards as background agents in each card's folder, tracks their progress, and runs the merge when you mark a card Done.
 
+## Screenshots
+
+The Board, Card, Projects and Activity tabs, with sample data.
+
+**Code tab of the desktop app**
+
+![Kanbot in the Code tab of the Claude desktop app](docs/kanbot-desktop.gif)
+
+**Terminal**
+
+![Kanbot in the Claude Code terminal](docs/kanbot-terminal.gif)
+
 ## Requirements
 
 - Claude Code 2.1.287 or later (mods are on by default from that version). Check with `claude --version`.
